@@ -39,69 +39,125 @@ def calculate_jeffreys_similarity(distributions):
             
     return total_similarity / num_pairs if num_pairs > 0 else torch.tensor(0.0, device=distributions[0].device)
 
-
-class PrototypeDiversityLoss(nn.Module):
-    def __init__(self, num_prototypes_per_class):
+class PrototypeDiversityRegularizer(nn.Module):
+    """
+    Stronger diversity regularizer that combines:
+    1) Prototype repulsion (pairwise cosine margin within a class).
+    2) Peaky assignments per pixel (low entropy per pixel).
+    3) Balanced prototype usage within a class (mass close to uniform).
+    """
+    def __init__(
+        self,
+        num_prototypes_per_class,
+        omega_window=7,
+        omega_min_mass=0.05,
+        temperature=0.07,
+        sharpness_weight=0.1,
+        coverage_weight=0.1,
+        repulsion_weight=0.5,
+        repulsion_margin=0.2,
+        jeffreys_weight=0.0,
+        debug=False,
+        debug_every=200,
+    ):
         super().__init__()
         self.num_prototypes_per_class = num_prototypes_per_class
+        self.omega_min_mass = omega_min_mass
+        self.temperature = temperature
+        self.sharpness_weight = sharpness_weight
+        self.coverage_weight = coverage_weight
+        self.repulsion_weight = repulsion_weight
+        self.repulsion_margin = repulsion_margin
+        self.jeffreys_weight = jeffreys_weight
+        self.debug = debug
+        self.debug_every = debug_every
 
-    def forward(self, feature_map, prototypes, gt_mask):
+    def _repulsion(self, prototypes):
+        # prototypes: [k, d], already normalized
+        sim = prototypes @ prototypes.t()  # [k, k]
+        eye = torch.eye(sim.size(0), device=sim.device, dtype=sim.dtype)
+        sim_off = sim * (1 - eye)
+        penalty = F.relu(sim_off - self.repulsion_margin).pow(2)
+        return penalty.mean()
+
+    def forward(self, feature_map, prototypes, gt_mask, global_step=None):
         """
-        Calculates diversity loss using Cosine Similarity.
-        
-        Args:
-            feature_map (torch.Tensor): Output from the encoder [B, D, H, W]
-            prototypes (torch.Tensor): The learnable prototype vectors [Total_Prototypes, D_proto]
-            gt_mask (torch.Tensor): Ground truth segmentation mask [B, H, W]
+        feature_map: [B, D, H, W] (we use the deepest feature map)
+        prototypes: [total_prototypes, D]
+        gt_mask: [B, H, W] pseudo or ground-truth mask
         """
         B, D, H, W = feature_map.shape
-        device = feature_map.device
-        total_loss = 0.0
+        total_prototypes = prototypes.shape[0]
+        num_classes = total_prototypes // self.num_prototypes_per_class
 
-        # Reshape for easier processing
-        feature_map_flat = feature_map.view(B, D, H * W).permute(0, 2, 1) # -> [B, H*W, D]
-        gt_mask_flat = gt_mask.view(B, H * W) # -> [B, H*W]
+        feature_flat = feature_map.permute(0, 2, 3, 1).reshape(B, -1, D)  # [B, HW, D]
+        mask_flat = gt_mask.view(B, -1)  # [B, HW]
 
-        num_classes = prototypes.shape[0] // self.num_prototypes_per_class
+        loss_batch = []
+        eps = 1e-8
 
-        for b in range(B): # Iterate over each image in the batch
+        for b in range(B):
             class_losses = []
-            for c in range(num_classes): # Iterate over each class present in the image
-                # Find pixels belonging to the current class 'c' in the ground truth
-                class_pixel_indices = (gt_mask_flat[b] == c).nonzero(as_tuple=True)[0]
-                
-                if len(class_pixel_indices) == 0:
-                    continue # Skip if this class is not in the ground truth for this image
+            for c in range(num_classes):
+                idxs = (mask_flat[b] == c).nonzero(as_tuple=True)[0]
+                if idxs.numel() == 0:
+                    continue
+                feats = feature_flat[b, idxs]  # [N, D]
+                feats = F.normalize(feats, dim=-1)
 
-                class_pixel_features = feature_map_flat[b, class_pixel_indices] # -> [Num_Pixels_c, D]
+                start = c * self.num_prototypes_per_class
+                end = start + self.num_prototypes_per_class
+                proto = prototypes[start:end]  # [k, D]
+                proto = F.normalize(proto, dim=-1)
 
-                # Get all prototypes for this class
-                start_idx = c * self.num_prototypes_per_class
-                end_idx = (c + 1) * self.num_prototypes_per_class
-                class_prototypes = prototypes[start_idx:end_idx] # -> [Num_Proto_c, D_proto]
-                
-                # Normalize features and prototypes for cosine similarity calculation
-                class_pixel_features_norm = F.normalize(class_pixel_features, p=2, dim=1)
-                class_prototypes_norm = F.normalize(class_prototypes, p=2, dim=1)
+                # Assignment over prototypes for this class
+                logits = feats @ proto.t() / max(self.temperature, 1e-4)
+                assign = F.softmax(logits, dim=1)  # [N, k]
+                proto_logits = logits  # [N, k]
 
-                # Calculate v(Z, p) for each prototype of this class
-                # v is the distribution of a prototype's activation over the class pixels
-                distributions_v = []
-                for p_k_norm in class_prototypes_norm:
-                    # Calculate cosine similarity from this prototype to all class pixels
-                    # Shape: [Num_Pixels_c]
-                    similarities = torch.matmul(class_pixel_features_norm, p_k_norm)
-                    
-                    # The activation distribution is the softmax over these similarities.
-                    v_distribution = F.softmax(similarities, dim=0)
-                    distributions_v.append(v_distribution)
+                # (1) Repulsion between prototypes
+                repulsion = self._repulsion(proto)
 
-                # Calculate Jeffrey's Similarity for this class's prototypes 
-                lj_c = calculate_jeffreys_similarity(distributions_v)
-                class_losses.append(lj_c)
+                # (2) Sharpness: encourage per-pixel assignment to be peaky
+                entropy = -(assign * (assign + eps).log()).sum(dim=1).mean()
 
-            if len(class_losses) > 0:
-                # Average the similarity loss across all classes for this image
-                total_loss += torch.mean(torch.stack(class_losses))
+                # (3) Coverage: encourage prototype usage to be balanced
+                mass = assign.sum(dim=0)  # [k]
+                mass = mass / (mass.sum() + eps)
+                target = torch.full_like(mass, 1.0 / self.num_prototypes_per_class)
+                coverage = F.mse_loss(mass, target)
 
-        return total_loss / B 
+                # Penalize collapsed prototypes (very low mass)
+                mass_floor = F.relu(self.omega_min_mass - mass).mean()
+
+                # (4) Jeffrey's similarity on per-prototype activation distributions 
+                jeff = torch.tensor(0.0, device=feature_map.device)
+                if self.jeffreys_weight > 0:
+                    # Build per-prototype spatial distributions: softmax over pixels
+                    proto_logits_norm = proto_logits - proto_logits.max(dim=0, keepdim=True).values
+                    distributions_v = [
+                        F.softmax(proto_logits_norm[:, i], dim=0)
+                        for i in range(proto_logits_norm.shape[1])
+                    ]
+                    jeff = calculate_jeffreys_similarity(distributions_v)
+
+                class_loss = (
+                    self.repulsion_weight * repulsion +
+                    self.sharpness_weight * entropy +
+                    self.coverage_weight * coverage +
+                    mass_floor +
+                    self.jeffreys_weight * jeff
+                )
+                class_losses.append(class_loss)
+
+            if class_losses:
+                loss_batch.append(torch.stack(class_losses).mean())
+
+        if not loss_batch:
+            return torch.tensor(0.0, device=feature_map.device)
+
+        loss = torch.stack(loss_batch).mean()
+
+        if self.debug and global_step is not None and global_step % self.debug_every == 0:
+            print(f"[Diversity] step {global_step} loss {loss.item():.4f}")
+        return loss

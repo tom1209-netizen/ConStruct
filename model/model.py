@@ -66,6 +66,10 @@ class TextPromptEncoder(nn.Module):
         self.learnable_prompt = learnable_prompt
 
         prompts = prompts or self._build_default_prompts(cls_num_classes)
+        # OmegaConf ListConfig or other iterables need to be cast to a plain list of strings
+        if not isinstance(prompts, (list, tuple)):
+            prompts = [prompts]
+        prompts = [str(p) for p in prompts]
         tokenized = self.processor(
             text=prompts,
             padding=True,
