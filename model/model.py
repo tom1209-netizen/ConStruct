@@ -1,3 +1,4 @@
+import math
 import pickle as pkl
 from functools import partial
 
@@ -5,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from timm.models.layers import trunc_normal_
+
+from medclip import MedCLIPModel, MedCLIPVisionModelViT, MedCLIPProcessor
 
 from model.segform import mix_transformer
 
@@ -37,6 +40,158 @@ class AdaptiveLayer(nn.Module):
         return x
 
 
+class TextPromptEncoder(nn.Module):
+    """
+    Lightweight wrapper around MedCLIP's text encoder to turn a list of
+    class descriptions into normalized embeddings that can be learned via
+    a small projection head.
+    """
+    def __init__(
+        self,
+        cls_num_classes,
+        prompts=None,
+        projection_dim=512,
+        learnable_prompt=False,
+        prompt_init_scale=0.02,
+    ):
+        super().__init__()
+        self.processor = MedCLIPProcessor()
+        self.text_model = MedCLIPModel(vision_cls=MedCLIPVisionModelViT).text_model
+        # Ensure the underlying BERT returns hidden states for pooling
+        if hasattr(self.text_model.model, "config"):
+            self.text_model.model.config.output_hidden_states = True
+        # We keep the language encoder frozen for stability
+        self.text_model.requires_grad_(False)
+        self.text_model.eval()
+        self.learnable_prompt = learnable_prompt
+
+        prompts = prompts or self._build_default_prompts(cls_num_classes)
+        tokenized = self.processor(
+            text=prompts,
+            padding=True,
+            truncation=True,
+            return_tensors="pt"
+        )
+        self.register_buffer("prompt_input_ids", tokenized["input_ids"], persistent=False)
+        self.register_buffer("prompt_attention_mask", tokenized["attention_mask"], persistent=False)
+
+        text_width = self.text_model.projection_head.out_features
+        self.text_proj = nn.Sequential(
+            nn.Linear(text_width, projection_dim),
+            nn.ReLU(),
+            nn.LayerNorm(projection_dim)
+        )
+        self.prompt_delta = None
+        if learnable_prompt:
+            delta = torch.zeros(cls_num_classes, text_width)
+            nn.init.trunc_normal_(delta, std=prompt_init_scale)
+            self.prompt_delta = nn.Parameter(delta)
+
+        with torch.no_grad():
+            text_embeds = self.text_model(
+                input_ids=self.prompt_input_ids,
+                attention_mask=self.prompt_attention_mask
+            )
+            text_embeds = self.text_proj(text_embeds)
+            text_embeds = F.normalize(text_embeds, dim=-1)
+        self.register_buffer("text_embedding", text_embeds, persistent=False)
+
+    @staticmethod
+    def _build_default_prompts(cls_num_classes):
+        base_prompts = [
+            "Histopathology patch showing invasive tumor epithelium.",
+            "Histopathology patch rich in fibrous stroma and connective tissue.",
+            "Histopathology patch dominated by lymphocytes and immune cells.",
+            "Histopathology patch with necrotic tissue and cellular debris."
+        ]
+        if cls_num_classes <= len(base_prompts):
+            return base_prompts[:cls_num_classes]
+        # Extend with generic prompts if more classes are present
+        for idx in range(len(base_prompts), cls_num_classes):
+            base_prompts.append(f"Histopathology patch for class {idx}.")
+        return base_prompts
+
+    def forward(self, device):
+        if hasattr(self, "text_embedding") and self.text_embedding is not None:
+            base = self.text_embedding.to(device)
+        else:
+            input_ids = self.prompt_input_ids.to(device)
+            attention_mask = self.prompt_attention_mask.to(device)
+            with torch.no_grad():
+                base = self.text_model(input_ids=input_ids, attention_mask=attention_mask)
+            base = self.text_proj(base)
+        if self.prompt_delta is not None:
+            base = base + self.prompt_delta.to(device)
+        return F.normalize(base, dim=-1)
+
+
+class TextGuidedCamFusion(nn.Module):
+    """
+    Computes per-class attention over CAM scales using text prompts as queries
+    and pooled image/prototype features as keys/values.
+    """
+    def __init__(
+        self,
+        cls_num_classes,
+        level_dims,
+        prototype_feature_dim,
+        fusion_dim=None,
+        prompts=None,
+        learnable_prompt=False,
+        prompt_init_scale=0.02,
+    ):
+        super().__init__()
+        self.cls_num_classes = cls_num_classes
+        self.fusion_dim = fusion_dim or prototype_feature_dim
+
+        self.text_encoder = TextPromptEncoder(
+            cls_num_classes=cls_num_classes,
+            prompts=prompts,
+            projection_dim=self.fusion_dim,
+            learnable_prompt=learnable_prompt,
+            prompt_init_scale=prompt_init_scale,
+        )
+
+        # Project concatenated image feature + prototype context to fusion_dim
+        self.image_projectors = nn.ModuleList([
+            nn.Sequential(
+                nn.LayerNorm(dim * 2),
+                nn.Linear(dim * 2, fusion_dim),
+                nn.ReLU()
+            ) for dim in level_dims
+        ])
+
+        # Learnable temperature for the attention logits
+        self.logit_scale = nn.Parameter(torch.ones(1))
+
+    def forward(self, pooled_features, projected_prototypes):
+        """
+        pooled_features: list of [B, C] pooled image features per level
+        projected_prototypes: list of [P, C] projected prototypes per level
+        """
+        if len(pooled_features) != len(projected_prototypes):
+            raise ValueError("pooled_features and projected_prototypes must have the same length")
+
+        device = pooled_features[0].device
+        text_features = self.text_encoder(device)  # [num_classes, fusion_dim]
+        text_features = F.normalize(text_features, dim=-1)
+
+        image_contexts = []
+        for pooled, proto, projector in zip(pooled_features, projected_prototypes, self.image_projectors):
+            proto_ctx = proto.mean(dim=0, keepdim=True).expand(pooled.shape[0], -1)
+            fused = torch.cat([pooled, proto_ctx], dim=1)
+            fused = projector(fused)
+            image_contexts.append(F.normalize(fused, dim=-1))
+
+        # [B, num_levels, fusion_dim]
+        image_contexts = torch.stack(image_contexts, dim=1)
+        logits = torch.einsum('kd,bld->bkl', text_features, image_contexts)
+        logits = logits / math.sqrt(self.fusion_dim)
+        logits = logits * torch.clamp(self.logit_scale, min=1e-4)
+        weights = torch.softmax(logits, dim=-1)  # [B, num_classes, num_levels]
+        return weights
+
+
 class ClsNetwork(nn.Module):
     def __init__(self,
         backbone='mit_b1',
@@ -45,13 +200,19 @@ class ClsNetwork(nn.Module):
         prototype_feature_dim=512,
         stride=[4, 2, 2, 1],
         pretrained=True,
-        n_ratio=0.5
+        n_ratio=0.5,
+        enable_text_fusion=True,
+        text_prompts=None,
+        fusion_dim=None,
+        learnable_text_prompt=False,
+        prompt_init_scale=0.02,
     ):
         super().__init__()
         self.cls_num_classes = cls_num_classes
         self.num_prototypes_per_class = num_prototypes_per_class
         self.total_prototypes = cls_num_classes * num_prototypes_per_class
         self.stride = stride
+        self.cam_fusion_levels = (1, 2, 3)  # use scales 2,3,4 for fusion
 
         # Backbone Encoder (Same as original)
         self.encoder = getattr(mix_transformer, backbone)(stride=self.stride)
@@ -89,6 +250,20 @@ class ClsNetwork(nn.Module):
         self.logit_scale2 = nn.parameter.Parameter(torch.ones([1]) * (1 / 0.07))
         self.logit_scale3 = nn.parameter.Parameter(torch.ones([1]) * (1 / 0.07))
         self.logit_scale4 = nn.parameter.Parameter(torch.ones([1]) * (1 / 0.07))
+
+        self.text_fusion = None
+        if enable_text_fusion:
+            fusion_dim_val = fusion_dim or prototype_feature_dim
+            level_dims = [self.in_channels[idx] for idx in self.cam_fusion_levels]
+            self.text_fusion = TextGuidedCamFusion(
+                cls_num_classes=cls_num_classes,
+                level_dims=level_dims,
+                prototype_feature_dim=prototype_feature_dim,
+                fusion_dim=fusion_dim_val,
+                prompts=text_prompts,
+                learnable_prompt=learnable_text_prompt,
+                prompt_init_scale=prompt_init_scale,
+            )
 
 
     def get_param_groups(self):
@@ -160,5 +335,14 @@ class ClsNetwork(nn.Module):
 
         feature_map_for_diversity = _x_all[3]
 
+        cam_weights = None
+        if self.text_fusion is not None:
+            pooled_feats = [
+                self.pooling(_x_all[idx], (1, 1)).flatten(1)
+                for idx in self.cam_fusion_levels
+            ]
+            proto_levels = [projected_p2, projected_p3, projected_p4]
+            cam_weights = self.text_fusion(pooled_feats, proto_levels)
+
         return (cls1, cam1, cls2, cam2, cls3, cam3, cls4, cam4, 
-                self.prototypes, self.k_list, feature_map_for_diversity)
+                self.prototypes, self.k_list, feature_map_for_diversity, cam_weights)

@@ -109,7 +109,12 @@ def train(cfg):
                     num_prototypes_per_class=cfg.model.num_prototypes_per_class,
                     prototype_feature_dim=cfg.model.prototype_feature_dim,
                     n_ratio=cfg.model.n_ratio,
-                    pretrained=cfg.train.pretrained)
+                    pretrained=cfg.train.pretrained,
+                    enable_text_fusion=getattr(cfg.model, "enable_text_fusion", True),
+                    text_prompts=getattr(cfg.model, "text_prompts", None),
+                    fusion_dim=getattr(cfg.model, "fusion_dim", None),
+                    learnable_text_prompt=getattr(cfg.model, "learnable_text_prompt", False),
+                    prompt_init_scale=getattr(cfg.model, "prompt_init_scale", 0.02))
     
     model.to(device)
 
@@ -191,6 +196,7 @@ def train(cfg):
         debug=(div_cfg.debug if div_cfg and "debug" in div_cfg else False),
         debug_every=(div_cfg.debug_every if div_cfg and "debug_every" in div_cfg else 200),
     ).to(device)
+    lambda_fuse = getattr(cfg.train, "l_fuse", 1.0)
 
     print("\nStarting training...")
     train_loader_iter = iter(train_loader)
@@ -211,7 +217,7 @@ def train(cfg):
         with torch.cuda.amp.autocast():
             # Unpack the new return value from the model
             (cls1, cam1, cls2, cam2, cls3, cam3, cls4, cam4, 
-             l_fea, k_list, feature_map_for_diversity) = model(inputs)
+             l_fea, k_list, feature_map_for_diversity, cam_weights) = model(inputs)
 
             # --- Classification Loss (L_CLS) ---
             cls1_merge = merge_to_parent_predictions(cls1, k_list, method=cfg.train.merge_train)
@@ -224,6 +230,12 @@ def train(cfg):
             loss3 = loss_function(cls3_merge, cls_labels)
             loss4 = loss_function(cls4_merge, cls_labels)
             cls_loss = cfg.train.l1 * loss1 + cfg.train.l2 * loss2 + cfg.train.l3 * loss3 + cfg.train.l4 * loss4
+            if cam_weights is not None:
+                stacked_cls = torch.stack([cls2_merge, cls3_merge, cls4_merge], dim=-1)
+                cam_weights = cam_weights / (cam_weights.sum(dim=-1, keepdim=True) + 1e-8)
+                fused_cls = (stacked_cls * cam_weights).sum(dim=-1)
+                loss_fused = loss_function(fused_cls, cls_labels)
+                cls_loss = cls_loss + lambda_fuse * loss_fused
 
             # --- Conditional application of other losses based on warm-up ---
             if n_iter >= cfg.train.warmup_iters:

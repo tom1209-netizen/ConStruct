@@ -9,6 +9,15 @@ model:
   n_ratio: 0.5
   num_prototypes_per_class: 3
   prototype_feature_dim: 512
+  enable_text_fusion: true
+  fusion_dim: 512
+  learnable_text_prompt: true
+  prompt_init_scale: 0.02
+  text_prompts:
+  - Histopathology patch showing invasive tumor epithelium.
+  - Histopathology patch rich in fibrous stroma and connective tissue.
+  - Histopathology patch dominated by lymphocytes and immune cells.
+  - Histopathology patch with necrotic tissue and cellular debris.
 dataset:
   name: bcss
   train_root: ./data/BCSS-WSSS/train
@@ -32,6 +41,7 @@ train:
   l4: 1.0
   l5: 0.1
   lambda_j: 0.50
+  l_fuse: 1.0
   diversity:
     omega_window: 7
     omega_min_mass: 0.05

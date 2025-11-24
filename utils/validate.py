@@ -21,6 +21,22 @@ from .hierarchical_utils import merge_to_parent_predictions, merge_subclass_cams
 from .pyutils import AverageMeter
 
 
+def fuse_cams_with_weights(cam2, cam3, cam4, cam_weights=None):
+    """
+    Fuse CAMs from three scales using either learned per-class weights or
+    the legacy fixed coefficients.
+    """
+    if cam_weights is None:
+        return 0.3 * cam2 + 0.3 * cam3 + 0.4 * cam4
+    if cam_weights.shape[-1] > 3:
+        cam_weights = cam_weights[..., -3:]
+    cam_weights = cam_weights / (cam_weights.sum(dim=-1, keepdim=True) + 1e-8)
+    w2 = cam_weights[..., 0].unsqueeze(-1).unsqueeze(-1)
+    w3 = cam_weights[..., 1].unsqueeze(-1).unsqueeze(-1)
+    w4 = cam_weights[..., 2].unsqueeze(-1).unsqueeze(-1)
+    return w2 * cam2 + w3 * cam3 + w4 * cam4
+
+
 def get_seg_label(cams, inputs, label):
     """Generate segmentation labels from CAMs"""
     with torch.no_grad():
@@ -72,7 +88,7 @@ def validate(model=None, data_loader=None, cfg=None, cls_loss_func=None):
             labels = labels.cuda()
             cls_label = cls_label.cuda().float()
 
-            (cls1, _, _, _, _, _, cls4, _, _, k_list, _) = model(inputs)
+            (cls1, _, _, _, _, _, cls4, _, _, k_list, _, cam_weights) = model(inputs)
             cls1 = merge_to_parent_predictions(cls1, k_list, method=cfg.train.merge_test)
             cls4 = merge_to_parent_predictions(cls4, k_list, method=cfg.train.merge_test)
             cls_loss = cls_loss_func(cls1, cls_label)
@@ -81,34 +97,28 @@ def validate(model=None, data_loader=None, cfg=None, cls_loss_func=None):
             avg_cls_acc4 = ((cls4_acc_check == cls_label).sum(dim=0) / cls4_acc_check.shape[0]).mean() * 100
             avg_meter.add({"all_cls_acc4": all_cls_acc4, "avg_cls_acc4": avg_cls_acc4, "cls_loss": cls_loss})
             
-            cams2 = []
-            cams3 = []
-            cams4 = []
+            fused_cams = []
             for tta_trans in tta_transform:
                 augmented_tensor = tta_trans.augment_image(inputs)
-                (_, _, _, cam2, _, cam3, _, cam4, _, k_list, _) = model(augmented_tensor)
+                (_, _, _, cam2, _, cam3, _, cam4, _, k_list, _, cam_weights) = model(augmented_tensor)
 
                 cam2 = merge_subclass_cams_to_parent(cam2, k_list, method=cfg.train.merge_test)
                 cam3 = merge_subclass_cams_to_parent(cam3, k_list, method=cfg.train.merge_test)
                 cam4 = merge_subclass_cams_to_parent(cam4, k_list, method=cfg.train.merge_test)
 
                 cam2 = get_seg_label(cam2, augmented_tensor, cls_label).cuda()
-                cam2 = tta_trans.deaugment_mask(cam2).unsqueeze(dim=0)
-                cams2.append(cam2)
+                cam2 = tta_trans.deaugment_mask(cam2)
                 
                 cam3 = get_seg_label(cam3, augmented_tensor, cls_label).cuda()
-                cam3 = tta_trans.deaugment_mask(cam3).unsqueeze(dim=0)
-                cams3.append(cam3)
+                cam3 = tta_trans.deaugment_mask(cam3)
 
                 cam4 = get_seg_label(cam4, augmented_tensor, cls_label).cuda()
-                cam4 = tta_trans.deaugment_mask(cam4).unsqueeze(dim=0)
-                cams4.append(cam4)
+                cam4 = tta_trans.deaugment_mask(cam4)
 
-            cams2 = torch.cat(cams2, dim=0).mean(dim=0)
-            cams3 = torch.cat(cams3, dim=0).mean(dim=0)
-            cams4 = torch.cat(cams4, dim=0).mean(dim=0)
+                fused = fuse_cams_with_weights(cam2, cam3, cam4, cam_weights)
+                fused_cams.append(fused.unsqueeze(dim=0))
 
-            fuse234 = 0.3 * cams2 + 0.3 * cams3 + 0.4 * cams4
+            fuse234 = torch.cat(fused_cams, dim=0).mean(dim=0)
 
             cam_max = torch.max(fuse234, dim=1, keepdim=True)[0]
             bg_cam = (1 - cam_max) ** 10
@@ -163,7 +173,7 @@ def generate_cam(model=None, data_loader=None, cfg=None, cls_loss_func=None):
             labels = labels.cuda()
             cls_label = cls_label.cuda().float()
 
-            (cls1, cam1, cls2, cam2, cls3, cam3, cls4, cam4, l_fea, k_list, _) = model(inputs)
+            (cls1, cam1, cls2, cam2, cls3, cam3, cls4, cam4, l_fea, k_list, _, cam_weights) = model(inputs)
 
             cam1 = merge_subclass_cams_to_parent(cam1, k_list, method=cfg.train.merge_test)
             cam2 = merge_subclass_cams_to_parent(cam2, k_list, method=cfg.train.merge_test)
@@ -175,7 +185,7 @@ def generate_cam(model=None, data_loader=None, cfg=None, cls_loss_func=None):
             cam3 = get_seg_label(cam3, inputs, cls_label).cuda()
             cam4 = get_seg_label(cam4, inputs, cls_label).cuda()
 
-            fuse234 = 0.3 * cam2 + 0.3 * cam3 + 0.4 * cam4
+            fuse234 = fuse_cams_with_weights(cam2, cam3, cam4, cam_weights)
             
             # This is the original, blobby prediction. We will replace this.
             # output_fuse234 = torch.argmax(fuse234, dim=1).long()

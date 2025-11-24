@@ -39,7 +39,12 @@ def main():
                     num_prototypes_per_class=cfg.model.num_prototypes_per_class,
                     prototype_feature_dim=cfg.model.prototype_feature_dim,
                     n_ratio=cfg.model.n_ratio,
-                    pretrained=False) 
+                    pretrained=False,
+                    enable_text_fusion=getattr(cfg.model, "enable_text_fusion", True),
+                    text_prompts=getattr(cfg.model, "text_prompts", None),
+                    fusion_dim=getattr(cfg.model, "fusion_dim", None),
+                    learnable_text_prompt=getattr(cfg.model, "learnable_text_prompt", False),
+                    prompt_init_scale=getattr(cfg.model, "prompt_init_scale", 0.02)) 
 
     # Load Checkpoint
     print(f"Loading checkpoint from: {args.checkpoint}")
