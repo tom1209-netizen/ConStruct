@@ -108,12 +108,20 @@ python main.py --config ./work_dirs/bcss/protobip/config_10prot_div05.yaml --gpu
 
 ### 3\. Test and Visualize
 
-To evaluate a trained model checkpoint on the test set:
+Evaluate, export CAMs, and inspect prototypes with the utilities in `visualization_utils/`:
 
-```bash
-# Evaluate the best checkpoint
-python visualization_utils/test_and_visualize.py --checkpoint ./work_dirs/bcss/lpd/latest.pth --config ./work_dirs/bcss/lpd/config.yaml
-```
+- Evaluate segmentation performance:
+  ```bash
+  python visualization_utils/evaluate_performance.py --config ./work_dirs/bcss/lpd/config.yaml --checkpoint ./work_dirs/bcss/lpd/latest.pth --gpu 0
+  ```
+- Generate CAM predictions for a split (saved to `<checkpoint_dir>/<split>_cams` by default):
+  ```bash
+  python visualization_utils/generate_cam.py --config ./work_dirs/bcss/lpd/config.yaml --checkpoint ./work_dirs/bcss/lpd/latest.pth --split test --gpu 0
+  ```
+- Visualize where each prototype focuses (provide filenames from `val_root/<split>/img`):
+  ```bash
+  python visualization_utils/visualize_prototypes.py --config ./work_dirs/bcss/lpd/config.yaml --checkpoint ./work_dirs/bcss/lpd/latest.pth --split test --images patient_01.png patient_02.png --gpu 0
+  ```
 
 ## License and Citation
 
