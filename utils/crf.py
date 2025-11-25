@@ -3,7 +3,8 @@ import numpy as np
 import pydensecrf.densecrf as dcrf
 from pydensecrf.utils import unary_from_softmax
 import matplotlib
-matplotlib.use("TkAgg")
+# Use a headless-friendly backend for environments without a display.
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 class DenseCRF:

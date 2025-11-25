@@ -6,6 +6,8 @@ import warnings
 
 import albumentations as A
 import cv2
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -20,6 +22,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from model.model import ClsNetwork
+from utils.hierarchical_utils import merge_subclass_cams_to_parent
+from utils.validate import fuse_cams_with_weights, get_seg_label
 
 warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib")
 
@@ -142,10 +146,41 @@ def extract_features_and_prototypes(model, image_tensor):
     return feature_map, projected
 
 
+def predict_mask(model, image_tensor, cls_label, cfg, palette):
+    """
+    Run the model to obtain fused CAM prediction and return a colorized mask.
+    """
+    with torch.no_grad():
+        outputs = model(image_tensor)
+        (_, cam1, _, cam2, _, cam3, _, cam4, _, k_list, _, cam_weights) = outputs
+
+        merge_method = getattr(cfg.train, "merge_test", "max")
+        cam2 = merge_subclass_cams_to_parent(cam2, k_list, method=merge_method)
+        cam3 = merge_subclass_cams_to_parent(cam3, k_list, method=merge_method)
+        cam4 = merge_subclass_cams_to_parent(cam4, k_list, method=merge_method)
+
+        cam2 = get_seg_label(cam2, image_tensor, cls_label).to(image_tensor.device)
+        cam3 = get_seg_label(cam3, image_tensor, cls_label).to(image_tensor.device)
+        cam4 = get_seg_label(cam4, image_tensor, cls_label).to(image_tensor.device)
+
+        fuse234 = fuse_cams_with_weights(cam2, cam3, cam4, cam_weights)
+        cam_max = torch.max(fuse234, dim=1, keepdim=True)[0]
+        bg_cam = (1 - cam_max) ** 10
+        full_probs_tensor = torch.cat([fuse234, bg_cam], dim=1)
+        probs = torch.softmax(full_probs_tensor, dim=1)
+        pred_mask = torch.argmax(probs, dim=1).squeeze(0).cpu().numpy().astype(np.uint8)
+
+    color_mask = np.zeros((pred_mask.shape[0], pred_mask.shape[1], 3), dtype=np.uint8)
+    for idx, color in enumerate(palette):
+        color_mask[pred_mask == idx] = color
+    return color_mask
+
+
 def save_activation_grid(
     image_rgb,
     image_bgr,
     mask_color,
+    pred_mask_color,
     class_names,
     model_label,
     feature_map,
@@ -173,9 +208,8 @@ def save_activation_grid(
         ha="center", va="center", fontsize=20, fontweight="bold"
     )
     axes[0, 1].imshow(image_rgb)
-    axes[0, 1].set_title("Input Image", fontsize=14)
     axes[0, 2].imshow(mask_color)
-    axes[0, 2].set_title("Mask", fontsize=14)
+    axes[0, 3].imshow(pred_mask_color)
 
     for class_idx in range(num_classes):
         row_idx = 1 + class_idx
@@ -194,9 +228,7 @@ def save_activation_grid(
             )
             heatmap = generate_heatmap(image_bgr, act_map)
             axes[row_idx, col_idx].imshow(cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB))
-            axes[row_idx, col_idx].set_title(f"Proto {rank + 1}", fontsize=12)
-
-    fig.suptitle(f"{model_label} prototype activations", fontsize=18)
+            
     plt.tight_layout(pad=1.0, h_pad=1.0, w_pad=1.0)
     out_path = os.path.join(out_dir, f"{base_name}_{model_label}_prototypes.png")
     fig.savefig(out_path, bbox_inches="tight", dpi=150)
@@ -246,15 +278,31 @@ def main():
             print(f"  Skipping {img_name}: failed to read image.")
             continue
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        mask_np = None
+        if os.path.exists(mask_path):
+            try:
+                mask_np = np.array(Image.open(mask_path))
+            except Exception:
+                mask_np = None
         mask_color = load_color_mask(mask_path, DEFAULT_PALETTE)
         image_tensor = transform(image=image_rgb)["image"].unsqueeze(0).to(device)
 
+        cls_label = torch.ones(1, cfg.dataset.cls_num_classes, device=device)
+        if mask_np is not None:
+            cls_label_np = np.zeros(cfg.dataset.cls_num_classes, dtype=np.float32)
+            present = np.unique(mask_np)
+            present = present[present < cfg.dataset.cls_num_classes]
+            cls_label_np[present] = 1
+            cls_label = torch.from_numpy(cls_label_np).unsqueeze(0).to(device)
+
         feature_map, projected = extract_features_and_prototypes(model, image_tensor)
+        pred_mask_color = predict_mask(model, image_tensor, cls_label, cfg, DEFAULT_PALETTE)
         base_name = Path(img_name).stem
         save_activation_grid(
             image_rgb=image_rgb,
             image_bgr=image_bgr,
             mask_color=mask_color,
+            pred_mask_color=pred_mask_color,
             class_names=class_names,
             model_label=model_label,
             feature_map=feature_map,
