@@ -4,3 +4,18 @@
 # Python
 __pycache__/
 
+# Data
+data/
+
+# Workspace
+work_dirs/*/classification/checkpoints/
+work_dirs/*/classification/predictions/
+
+# Outputs
+outputs/
+
+# Pretrained models weight
+pretrained/
+
+# Logs 
+logs/

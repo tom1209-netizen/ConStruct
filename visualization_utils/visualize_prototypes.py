@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 from pathlib import Path
 import warnings
 
@@ -13,6 +14,10 @@ from albumentations.pytorch import ToTensorV2
 from omegaconf import OmegaConf
 from PIL import Image
 from tqdm import tqdm
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from model.model import ClsNetwork
 

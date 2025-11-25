@@ -1,10 +1,16 @@
 import argparse
 import os
+import sys
+from pathlib import Path
 
 import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from model.model import ClsNetwork
 from utils.pyutils import set_seed

@@ -1,10 +1,10 @@
 CONFIG ?= work_dirs/bcss/classification/config.yaml
 GPU ?= 0
 LOG_DIR ?= logs
-CHECKPOINT ?= work_dirs/bcss/classification/best_cam.pth
+CHECKPOINT ?= work_dirs/bcss/classification/checkpoints/2025-11-24-07-07/best_cam.pth
 SPLIT ?= test
-OUT_DIR ?=
-IMAGES ?=
+OUT_DIR ?= outputs
+IMAGES ?= TCGA-D8-A27F-DX1_xmin98787_ymin6725_MPP-0.2500+1.png
 
 .PHONY: train
 train:
