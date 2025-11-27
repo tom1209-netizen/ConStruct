@@ -57,6 +57,7 @@ class PrototypeDiversityRegularizer(nn.Module):
         repulsion_weight=0.5,
         repulsion_margin=0.2,
         jeffreys_weight=0.0,
+        pool_size=None,
         debug=False,
         debug_every=200,
     ):
@@ -69,6 +70,7 @@ class PrototypeDiversityRegularizer(nn.Module):
         self.repulsion_weight = repulsion_weight
         self.repulsion_margin = repulsion_margin
         self.jeffreys_weight = jeffreys_weight
+        self.pool_size = pool_size
         self.debug = debug
         self.debug_every = debug_every
 
@@ -86,6 +88,10 @@ class PrototypeDiversityRegularizer(nn.Module):
         prototypes: [total_prototypes, D]
         gt_mask: [B, H, W] pseudo or ground-truth mask
         """
+        if self.pool_size is not None:
+            feature_map = F.adaptive_avg_pool2d(feature_map, output_size=(self.pool_size, self.pool_size))
+            gt_mask = F.interpolate(gt_mask.unsqueeze(1).float(), size=(self.pool_size, self.pool_size), mode="nearest").squeeze(1).long()
+
         B, D, H, W = feature_map.shape
         total_prototypes = prototypes.shape[0]
         num_classes = total_prototypes // self.num_prototypes_per_class

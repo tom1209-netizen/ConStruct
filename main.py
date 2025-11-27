@@ -231,6 +231,7 @@ def build_loss_components(cfg, device):
         repulsion_weight=(div_cfg.repulsion_weight if div_cfg and hasattr(div_cfg, "repulsion_weight") else 0.5),
         repulsion_margin=(div_cfg.repulsion_margin if div_cfg and hasattr(div_cfg, "repulsion_margin") else 0.2),
         jeffreys_weight=(div_cfg.jeffreys_weight if div_cfg and hasattr(div_cfg, "jeffreys_weight") else 0.0),
+        pool_size=(div_cfg.pool_size if div_cfg and hasattr(div_cfg, "pool_size") else None),
         debug=(div_cfg.debug if div_cfg and "debug" in div_cfg else False),
         debug_every=(div_cfg.debug_every if div_cfg and "debug_every" in div_cfg else 200),
     ).to(device)

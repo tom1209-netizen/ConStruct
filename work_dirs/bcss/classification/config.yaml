@@ -48,13 +48,14 @@ train:
   l_fuse: 1.0
   diversity:
     omega_window: 7
-    omega_min_mass: 0.05
-    temperature: 0.07
-    sharpness_weight: 0.1
-    coverage_weight: 0.1
-    repulsion_weight: 0.5
-    repulsion_margin: 0.2
+    omega_min_mass: 0.1
+    temperature: 0.05
+    sharpness_weight: 0.2
+    coverage_weight: 0.2
+    repulsion_weight: 0.8
+    repulsion_margin: 0.25
     jeffreys_weight: 0.1
+    pool_size: 14
     debug: true
     debug_every: 500
   mask_adapter_alpha: 0.5
