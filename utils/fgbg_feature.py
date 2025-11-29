@@ -58,16 +58,16 @@ class FeatureExtractor:
         self.input_std = input_std
         
     def prepare_cam_mask(self, cam, N):
-        cam_224 = F.interpolate(cam, (self.clip_size, self.clip_size), 
+        cam_224 = F.interpolate(cam, self.clip_size, 
                               mode="bilinear", align_corners=True)
-        cam_224 = cam_224.reshape(N * cam.size(1), 1, self.clip_size, self.clip_size)
+        cam_224 = cam_224.reshape(N * cam.size(1), 1, self.clip_size[0], self.clip_size[1])
 
         cam_224_mask = self.mask_adapter(cam_224)
         
         return cam_224, cam_224_mask
         
     def prepare_image(self, img):
-        return F.interpolate(img, (self.clip_size, self.clip_size), 
+        return F.interpolate(img, self.clip_size, 
                            mode="bilinear", align_corners=True)
         
     # Implements the element-wise multiplication from Equation 5
@@ -107,6 +107,8 @@ class FeatureExtractor:
         # Renormalize into CONCH space if dataset normalization differs
         if self.input_mean is not None and self.input_std is not None:
             inputs = self.clip_adapter.normalize_for_conch(inputs, self.input_mean, self.input_std)
+        # Resize inputs to match CONCH resolution for masking
+        inputs_resized = self.prepare_image(inputs)
             
         cam_224 = F.interpolate(cam, self.clip_size, 
                                mode="bilinear", align_corners=True)
@@ -116,7 +118,7 @@ class FeatureExtractor:
         
         # Separates the image into FG and BG regions
         fg_features, bg_features, fg_masks, bg_masks = self.extract_features(
-            inputs, cam_224, cam_224_mask, label
+            inputs_resized, cam_224, cam_224_mask, label
         )
         
         # Extracts features from these regions using MedCLIP
