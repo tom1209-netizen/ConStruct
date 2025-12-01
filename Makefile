@@ -68,3 +68,7 @@ help:
 	@echo ""
 	@echo "  help            Show this help message."
 	@echo "======================================================================"
+
+
+trainv2_200eps:
+	python mainv2.py --config configs/bcss.yaml 

@@ -277,6 +277,7 @@ class ClsNetwork(nn.Module):
         self.prototype_init_mode = prototype_init_mode
         self.prototype_text_noise_std = prototype_text_noise_std
         self.prototype_initialized = prototype_init_mode == "random"
+        
         if enable_text_fusion:
             fusion_dim_val = fusion_dim or self.prototype_feature_dim
             level_dims = [self.in_channels[idx] for idx in self.cam_fusion_levels]
