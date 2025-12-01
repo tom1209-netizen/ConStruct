@@ -1,3 +1,8 @@
+from utils.validate import generate_cam
+from utils.trainutils import get_cls_dataset, get_mean_std
+from utils.pyutils import set_seed
+from model.conch_adapter import ConchAdapter
+from model.model import ClsNetwork
 import argparse
 import os
 import sys
@@ -11,21 +16,22 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from model.model import ClsNetwork
-from model.conch_adapter import ConchAdapter
-from utils.pyutils import set_seed
-from utils.trainutils import get_cls_dataset
-from utils.validate import generate_cam
-
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Generate CAM predictions for a dataset split.")
-    parser.add_argument("--config", required=True, type=str, help="Path to the config file.")
-    parser.add_argument("--checkpoint", required=True, type=str, help="Path to the model checkpoint (best_cam.pth).")
-    parser.add_argument("--split", default="test", choices=["test", "valid"], help="Dataset split to run on.")
-    parser.add_argument("--out-dir", type=str, default=None, help="Directory to save CAM outputs.")
-    parser.add_argument("--batch-size", type=int, default=1, help="Batch size for CAM generation.")
-    parser.add_argument("--num-workers", type=int, default=8, help="Number of DataLoader workers.")
+    parser = argparse.ArgumentParser(
+        description="Generate CAM predictions for a dataset split.")
+    parser.add_argument("--config", required=True, type=str,
+                        help="Path to the config file.")
+    parser.add_argument("--checkpoint", required=True, type=str,
+                        help="Path to the model checkpoint (best_cam.pth).")
+    parser.add_argument("--split", default="test",
+                        choices=["test", "valid"], help="Dataset split to run on.")
+    parser.add_argument("--out-dir", type=str, default=None,
+                        help="Directory to save CAM outputs.")
+    parser.add_argument("--batch-size", type=int, default=1,
+                        help="Batch size for CAM generation.")
+    parser.add_argument("--num-workers", type=int, default=8,
+                        help="Number of DataLoader workers.")
     parser.add_argument("--gpu", type=int, default=0, help="GPU id to use.")
     return parser.parse_args()
 
@@ -33,7 +39,8 @@ def parse_args():
 def build_model(cfg, checkpoint_path, device):
     clip_adapter = None
     if cfg.model.backbone.config.startswith("conch"):
-        clip_cfg = OmegaConf.to_container(getattr(cfg, "clip", None) or {}, resolve=True)
+        clip_cfg = OmegaConf.to_container(
+            getattr(cfg, "clip", None) or {}, resolve=True)
         clip_adapter = ConchAdapter(
             model_name=clip_cfg.get("model_name", "conch_ViT-B-16"),
             checkpoint_path=clip_cfg.get("checkpoint_path"),
@@ -45,6 +52,9 @@ def build_model(cfg, checkpoint_path, device):
             proj_contrast=clip_cfg.get("proj_contrast", False),
             freeze=clip_cfg.get("freeze", True),
         )
+    guidance_cfg = OmegaConf.to_container(
+        getattr(cfg.model, "segformer_guidance", {}), resolve=True)
+    input_mean, input_std = get_mean_std(cfg.dataset.name)
     model = ClsNetwork(
         backbone=cfg.model.backbone.config,
         stride=cfg.model.backbone.stride,
@@ -57,13 +67,24 @@ def build_model(cfg, checkpoint_path, device):
         enable_text_fusion=getattr(cfg.model, "enable_text_fusion", True),
         text_prompts=getattr(cfg.model, "text_prompts", None),
         fusion_dim=getattr(cfg.model, "fusion_dim", None),
-        learnable_text_prompt=getattr(cfg.model, "learnable_text_prompt", False),
+        learnable_text_prompt=getattr(
+            cfg.model, "learnable_text_prompt", False),
         prompt_init_scale=getattr(cfg.model, "prompt_init_scale", 0.02),
-        prototype_init_mode=getattr(cfg.model, "prototype_init_mode", "text_learnable"),
-        prototype_text_noise_std=getattr(cfg.model, "prototype_text_noise_std", 0.02),
+        prototype_init_mode=getattr(
+            cfg.model, "prototype_init_mode", "text_learnable"),
+        prototype_text_noise_std=getattr(
+            cfg.model, "prototype_text_noise_std", 0.02),
         use_ctx_prompt=getattr(cfg.model, "use_ctx_prompt", False),
         ctx_prompt_len=getattr(cfg.model, "ctx_prompt_len", 8),
         ctx_class_specific=getattr(cfg.model, "ctx_class_specific", False),
+        enable_segformer_guidance=guidance_cfg.get("enable", False),
+        segformer_backbone=guidance_cfg.get("backbone", "mit_b1"),
+        segformer_checkpoint=guidance_cfg.get("checkpoint", None),
+        guidance_layers=tuple(guidance_cfg.get("layers", (2,))),
+        train_clip_visual=guidance_cfg.get("train_clip_visual", None),
+        input_mean=input_mean,
+        input_std=input_std,
+        use_structure_adapter=guidance_cfg.get("use_structure_adapter", False),
     )
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -76,7 +97,8 @@ def build_model(cfg, checkpoint_path, device):
 def main():
     args = parse_args()
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for CAM generation; no GPU was detected.")
+        raise RuntimeError(
+            "CUDA is required for CAM generation; no GPU was detected.")
 
     torch.cuda.set_device(args.gpu)
     device = torch.device(f"cuda:{args.gpu}")
@@ -84,7 +106,8 @@ def main():
     set_seed(42)
     cfg = OmegaConf.load(args.config)
 
-    output_dir = args.out_dir or os.path.join(os.path.dirname(args.checkpoint), f"{args.split}_cams")
+    output_dir = args.out_dir or os.path.join(
+        os.path.dirname(args.checkpoint), f"{args.split}_cams")
     os.makedirs(output_dir, exist_ok=True)
     cfg.work_dir.pred_dir = output_dir
     print(f"Saves CAM masks to: {output_dir}")
@@ -93,7 +116,8 @@ def main():
     model = build_model(cfg, args.checkpoint, device)
 
     print(f"Preparing {args.split} dataset...")
-    _, cam_dataset = get_cls_dataset(cfg, split=args.split, enable_rotation=False, p=0.0)
+    _, cam_dataset = get_cls_dataset(
+        cfg, split=args.split, enable_rotation=False, p=0.0)
     cam_loader = DataLoader(
         cam_dataset,
         batch_size=args.batch_size,

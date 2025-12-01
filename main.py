@@ -32,7 +32,8 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--gpu", type=int, default=0, help="gpu id")
-    parser.add_argument("--resume", type=str, default=None, help="path to checkpoint")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="path to checkpoint")
     return parser.parse_args()
 
 
@@ -61,7 +62,8 @@ def get_device(gpu_id: int):
 
 def build_clip_model(cfg, device):
     clip_cfg = getattr(cfg, "clip", None)
-    clip_cfg = OmegaConf.to_container(clip_cfg, resolve=True) if clip_cfg is not None else {}
+    clip_cfg = OmegaConf.to_container(
+        clip_cfg, resolve=True) if clip_cfg is not None else {}
 
     model_name = clip_cfg.get("model_name", "conch_ViT-B-16")
     checkpoint_path = clip_cfg.get("checkpoint_path")
@@ -110,6 +112,9 @@ def build_dataloaders(cfg, num_workers):
 
 
 def build_model(cfg, device, clip_adapter=None):
+    guidance_cfg = OmegaConf.to_container(
+        getattr(cfg.model, "segformer_guidance", {}), resolve=True)
+    input_mean, input_std = get_mean_std(cfg.dataset.name)
     model = ClsNetwork(
         backbone=cfg.model.backbone.config,
         stride=cfg.model.backbone.stride,
@@ -122,13 +127,24 @@ def build_model(cfg, device, clip_adapter=None):
         enable_text_fusion=getattr(cfg.model, "enable_text_fusion", True),
         text_prompts=getattr(cfg.model, "text_prompts", None),
         fusion_dim=getattr(cfg.model, "fusion_dim", None),
-        learnable_text_prompt=getattr(cfg.model, "learnable_text_prompt", False),
+        learnable_text_prompt=getattr(
+            cfg.model, "learnable_text_prompt", False),
         prompt_init_scale=getattr(cfg.model, "prompt_init_scale", 0.02),
-        prototype_init_mode=getattr(cfg.model, "prototype_init_mode", "text_learnable"),
-        prototype_text_noise_std=getattr(cfg.model, "prototype_text_noise_std", 0.02),
+        prototype_init_mode=getattr(
+            cfg.model, "prototype_init_mode", "text_learnable"),
+        prototype_text_noise_std=getattr(
+            cfg.model, "prototype_text_noise_std", 0.02),
         use_ctx_prompt=getattr(cfg.model, "use_ctx_prompt", False),
         ctx_prompt_len=getattr(cfg.model, "ctx_prompt_len", 8),
         ctx_class_specific=getattr(cfg.model, "ctx_class_specific", False),
+        enable_segformer_guidance=guidance_cfg.get("enable", False),
+        segformer_backbone=guidance_cfg.get("backbone", "mit_b1"),
+        segformer_checkpoint=guidance_cfg.get("checkpoint", None),
+        guidance_layers=tuple(guidance_cfg.get("layers", (2,))),
+        train_clip_visual=guidance_cfg.get("train_clip_visual", None),
+        input_mean=input_mean,
+        input_std=input_std,
+        use_structure_adapter=guidance_cfg.get("use_structure_adapter", False),
     )
     return model.to(device)
 
@@ -155,7 +171,8 @@ def resume(args, model, optimizer, device):
         return start_iter, best_metric
 
     if not os.path.exists(args.resume):
-        print(f"WARNING: Checkpoint file not found at {args.resume}. Starting from scratch.")
+        print(
+            f"WARNING: Checkpoint file not found at {args.resume}. Starting from scratch.")
         return start_iter, best_metric
 
     print(f"\nResuming training from checkpoint: {args.resume}")
@@ -172,7 +189,8 @@ def resume(args, model, optimizer, device):
         start_iter = checkpoint["iter"] + 1
         print(f"Resuming from iteration: {start_iter}")
     else:
-        print("WARNING: Iteration number not found in checkpoint. Starting from iteration 0.")
+        print(
+            "WARNING: Iteration number not found in checkpoint. Starting from iteration 0.")
 
     if "best_mIoU" in checkpoint:
         best_metric = checkpoint["best_mIoU"]
@@ -196,11 +214,13 @@ def compute_proto_text_contrast(feature_map, pseudo_mask, projected_p4, text_fea
     masks = pseudo_mask.view(B, -1)  # [B, HW]
 
     # Prototype means in feature space
-    proto_feat = projected_p4.view(-1, k_per_class, projected_p4.shape[-1]).mean(dim=1)  # [classes, C]
+    proto_feat = projected_p4.view(-1, k_per_class,
+                                   projected_p4.shape[-1]).mean(dim=1)  # [classes, C]
     proto_feat = F.normalize(proto_feat, dim=-1)
 
     # Prototype means in proto/text space
-    proto_raw = raw_prototypes.view(-1, k_per_class, raw_prototypes.shape[-1]).mean(dim=1)  # [classes, D]
+    proto_raw = raw_prototypes.view(-1, k_per_class,
+                                    raw_prototypes.shape[-1]).mean(dim=1)  # [classes, D]
     proto_raw = F.normalize(proto_raw, dim=-1)
 
     text_features = F.normalize(text_features, dim=-1)  # [classes, D]
@@ -240,7 +260,8 @@ def compute_proto_text_contrast(feature_map, pseudo_mask, projected_p4, text_fea
 
 def build_loss_components(cfg, device, clip_adapter):
     loss_function = nn.BCEWithLogitsLoss().to(device)
-    mask_adapter = MaskAdapter_DynamicThreshold(alpha=cfg.train.mask_adapter_alpha)
+    mask_adapter = MaskAdapter_DynamicThreshold(
+        alpha=cfg.train.mask_adapter_alpha)
     input_mean, input_std = get_mean_std(cfg.dataset.name)
     feature_extractor = FeatureExtractor(
         mask_adapter=mask_adapter,
@@ -257,15 +278,23 @@ def build_loss_components(cfg, device, clip_adapter):
         num_prototypes_per_class=cfg.model.num_prototypes_per_class,
         omega_window=(div_cfg.omega_window if div_cfg else 7),
         omega_min_mass=(div_cfg.omega_min_mass if div_cfg else 0.05),
-        temperature=(div_cfg.temperature if div_cfg and hasattr(div_cfg, "temperature") else 0.07),
-        sharpness_weight=(div_cfg.sharpness_weight if div_cfg and hasattr(div_cfg, "sharpness_weight") else 0.1),
-        coverage_weight=(div_cfg.coverage_weight if div_cfg and hasattr(div_cfg, "coverage_weight") else 0.1),
-        repulsion_weight=(div_cfg.repulsion_weight if div_cfg and hasattr(div_cfg, "repulsion_weight") else 0.5),
-        repulsion_margin=(div_cfg.repulsion_margin if div_cfg and hasattr(div_cfg, "repulsion_margin") else 0.2),
-        jeffreys_weight=(div_cfg.jeffreys_weight if div_cfg and hasattr(div_cfg, "jeffreys_weight") else 0.0),
-        pool_size=(div_cfg.pool_size if div_cfg and hasattr(div_cfg, "pool_size") else None),
+        temperature=(div_cfg.temperature if div_cfg and hasattr(
+            div_cfg, "temperature") else 0.07),
+        sharpness_weight=(div_cfg.sharpness_weight if div_cfg and hasattr(
+            div_cfg, "sharpness_weight") else 0.1),
+        coverage_weight=(div_cfg.coverage_weight if div_cfg and hasattr(
+            div_cfg, "coverage_weight") else 0.1),
+        repulsion_weight=(div_cfg.repulsion_weight if div_cfg and hasattr(
+            div_cfg, "repulsion_weight") else 0.5),
+        repulsion_margin=(div_cfg.repulsion_margin if div_cfg and hasattr(
+            div_cfg, "repulsion_margin") else 0.2),
+        jeffreys_weight=(div_cfg.jeffreys_weight if div_cfg and hasattr(
+            div_cfg, "jeffreys_weight") else 0.0),
+        pool_size=(div_cfg.pool_size if div_cfg and hasattr(
+            div_cfg, "pool_size") else None),
         debug=(div_cfg.debug if div_cfg and "debug" in div_cfg else False),
-        debug_every=(div_cfg.debug_every if div_cfg and "debug_every" in div_cfg else 200),
+        debug_every=(
+            div_cfg.debug_every if div_cfg and "debug_every" in div_cfg else 200),
     ).to(device)
     lambda_fuse = getattr(cfg.train, "l_fuse", 1.0)
     lambda_proto_text = getattr(cfg.train, "l_proto_text", 0.0)
@@ -316,7 +345,8 @@ def train(cfg, args):
     time0 = datetime.datetime.now().replace(microsecond=0)
 
     print("\nPreparing datasets...")
-    train_dataset, val_dataset, train_loader, val_loader = build_dataloaders(cfg, num_workers)
+    train_dataset, val_dataset, train_loader, val_loader = build_dataloaders(
+        cfg, num_workers)
 
     iters_per_epoch = len(train_loader)
     cfg.train.max_iters = cfg.train.epoch * iters_per_epoch
@@ -336,6 +366,7 @@ def train(cfg, args):
     lambda_fuse = losses["lambda_fuse"]
     lambda_proto_text = losses["lambda_proto_text"]
     proto_text_temp = losses["proto_text_temp"]
+    lambda_struct = getattr(cfg.train, "l_struct", 0.0)
 
     scaler = torch.cuda.amp.GradScaler()
     model.train()
@@ -357,35 +388,82 @@ def train(cfg, args):
         iter_diversity_loss = None
 
         with torch.cuda.amp.autocast():
-            (cls1, cam1, cls2, cam2, cls3, cam3, cls4, cam4, l_fea, k_list, feature_map_for_diversity, cam_weights, projected_p4, text_features_out) = model(inputs)
+            outputs = model(inputs)
+            if len(outputs) == 15:
+                (
+                    cls1,
+                    cam1,
+                    cls2,
+                    cam2,
+                    cls3,
+                    cam3,
+                    cls4,
+                    cam4,
+                    l_fea,
+                    k_list,
+                    feature_map_for_diversity,
+                    cam_weights,
+                    projected_p4,
+                    text_features_out,
+                    distill_loss,
+                ) = outputs
+            else:
+                (
+                    cls1,
+                    cam1,
+                    cls2,
+                    cam2,
+                    cls3,
+                    cam3,
+                    cls4,
+                    cam4,
+                    l_fea,
+                    k_list,
+                    feature_map_for_diversity,
+                    cam_weights,
+                    projected_p4,
+                    text_features_out,
+                ) = outputs
+                distill_loss = None
 
-            cls1_merge = merge_to_parent_predictions(cls1, k_list, method=cfg.train.merge_train)
-            cls2_merge = merge_to_parent_predictions(cls2, k_list, method=cfg.train.merge_train)
-            cls3_merge = merge_to_parent_predictions(cls3, k_list, method=cfg.train.merge_train)
-            cls4_merge = merge_to_parent_predictions(cls4, k_list, method=cfg.train.merge_train)
+            cls1_merge = merge_to_parent_predictions(
+                cls1, k_list, method=cfg.train.merge_train)
+            cls2_merge = merge_to_parent_predictions(
+                cls2, k_list, method=cfg.train.merge_train)
+            cls3_merge = merge_to_parent_predictions(
+                cls3, k_list, method=cfg.train.merge_train)
+            cls4_merge = merge_to_parent_predictions(
+                cls4, k_list, method=cfg.train.merge_train)
 
             loss1 = loss_function(cls1_merge, cls_labels)
             loss2 = loss_function(cls2_merge, cls_labels)
             loss3 = loss_function(cls3_merge, cls_labels)
             loss4 = loss_function(cls4_merge, cls_labels)
-            cls_loss = cfg.train.l1 * loss1 + cfg.train.l2 * loss2 + cfg.train.l3 * loss3 + cfg.train.l4 * loss4
+            cls_loss = cfg.train.l1 * loss1 + cfg.train.l2 * \
+                loss2 + cfg.train.l3 * loss3 + cfg.train.l4 * loss4
             if cam_weights is not None:
-                stacked_cls = torch.stack([cls2_merge, cls3_merge, cls4_merge], dim=-1)
-                cam_weights = cam_weights / (cam_weights.sum(dim=-1, keepdim=True) + 1e-8)
+                stacked_cls = torch.stack(
+                    [cls2_merge, cls3_merge, cls4_merge], dim=-1)
+                cam_weights = cam_weights / \
+                    (cam_weights.sum(dim=-1, keepdim=True) + 1e-8)
                 fused_cls = (stacked_cls * cam_weights).sum(dim=-1)
                 loss_fused = loss_function(fused_cls, cls_labels)
                 cls_loss = cls_loss + lambda_fuse * loss_fused
 
             if n_iter >= cfg.train.warmup_iters:
-                subclass_labels = expand_parent_to_subclass_labels(cls_labels, k_list)
-                cls4_expand = expand_parent_to_subclass_labels(cls4_merge, k_list)
+                subclass_labels = expand_parent_to_subclass_labels(
+                    cls_labels, k_list)
+                cls4_expand = expand_parent_to_subclass_labels(
+                    cls4_merge, k_list)
                 cls4_bir = (cls4 > cls4_expand).float() * subclass_labels
-                batch_info = feature_extractor.process_batch(inputs, cam4, cls4_bir)
+                batch_info = feature_extractor.process_batch(
+                    inputs, cam4, cls4_bir)
 
                 contrastive_loss = None
                 if batch_info is not None:
                     fg_features, bg_features = batch_info["fg_features"], batch_info["bg_features"]
-                    set_info = pair_features(fg_features, bg_features, l_fea, cls4_bir)
+                    set_info = pair_features(
+                        fg_features, bg_features, l_fea, cls4_bir)
                     fg_features, bg_features, fg_pro, bg_pro = (
                         set_info["fg_features"],
                         set_info["bg_features"],
@@ -397,18 +475,22 @@ def train(cfg, args):
                     contrastive_loss = fg_loss + bg_loss
 
                 with torch.no_grad():
-                    cam4_merged = merge_subclass_cams_to_parent(cam4, k_list, method=cfg.train.merge_train)
+                    cam4_merged = merge_subclass_cams_to_parent(
+                        cam4, k_list, method=cfg.train.merge_train)
                     cam_max, _ = torch.max(cam4_merged, dim=1, keepdim=True)
                     background_score = torch.full_like(cam_max, 0.2)
-                    full_cam = torch.cat([background_score, cam4_merged], dim=1)
+                    full_cam = torch.cat(
+                        [background_score, cam4_merged], dim=1)
                     pseudo_mask = torch.argmax(full_cam, dim=1)
 
                 pseudo_mask_resized = F.interpolate(
                     pseudo_mask.unsqueeze(1).float(), size=feature_map_for_diversity.shape[2:], mode="nearest"
                 ).squeeze(1).long()
-                diversity_loss = diversity_loss_fn(feature_map_for_diversity, projected_p4, pseudo_mask_resized, global_step=n_iter)
+                diversity_loss = diversity_loss_fn(
+                    feature_map_for_diversity, projected_p4, pseudo_mask_resized, global_step=n_iter)
                 iter_diversity_loss = diversity_loss.detach().item()
-                diversity_running_avg = monitor_diversity_loss(diversity_meter, diversity_loss)
+                diversity_running_avg = monitor_diversity_loss(
+                    diversity_meter, diversity_loss)
 
                 proto_text_loss = None
                 if lambda_proto_text > 0:
@@ -429,12 +511,17 @@ def train(cfg, args):
                 if proto_text_loss is not None:
                     loss = loss + lambda_proto_text * proto_text_loss
                 if contrastive_loss is not None:
-                    loss = loss + lambda_sim * (contrastive_loss + 0.0005 * torch.mean(cam4))
+                    loss = loss + lambda_sim * \
+                        (contrastive_loss + 0.0005 * torch.mean(cam4))
             else:
                 loss = cls_loss
 
+            if distill_loss is not None and lambda_struct > 0:
+                loss = loss + lambda_struct * distill_loss
+
         if n_iter == cfg.train.warmup_iters:
-            print(f"\n--- Iteration {n_iter}: Warm-up complete. Activating contrastive and diversity losses. ---\n")
+            print(
+                f"\n--- Iteration {n_iter}: Warm-up complete. Activating contrastive and diversity losses. ---\n")
 
         optimizer.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
@@ -446,8 +533,10 @@ def train(cfg, args):
             cur_lr = optimizer.param_groups[0]["lr"]
             torch.cuda.synchronize()
             cls_pred4 = (torch.sigmoid(cls4_merge) > 0.5).float()
-            all_cls_acc4 = (cls_pred4 == cls_labels).all(dim=1).float().mean() * 100
-            avg_cls_acc4 = ((cls_pred4 == cls_labels).float().mean(dim=0)).mean() * 100
+            all_cls_acc4 = (cls_pred4 == cls_labels).all(
+                dim=1).float().mean() * 100
+            avg_cls_acc4 = (
+                (cls_pred4 == cls_labels).float().mean(dim=0)).mean() * 100
             div_last_str = f"{iter_diversity_loss:.4f}" if iter_diversity_loss is not None else "N/A"
             div_avg_str = f"{diversity_running_avg:.4f}" if diversity_running_avg is not None else "N/A"
             print(
@@ -476,16 +565,19 @@ def train(cfg, args):
 
             saving_grace_period = cfg.train.eval_iters
             if (n_iter + 1) > (cfg.train.warmup_iters + saving_grace_period):
-                best_fuse234_dice = save_best(model, optimizer, best_fuse234_dice, cfg, n_iter, current_miou)
+                best_fuse234_dice = save_best(
+                    model, optimizer, best_fuse234_dice, cfg, n_iter, current_miou)
             else:
-                print(f"--- In warm-up or grace period (current iter: {n_iter + 1}). Skipping best model check. ---")
+                print(
+                    f"--- In warm-up or grace period (current iter: {n_iter + 1}). Skipping best model check. ---")
 
     torch.cuda.empty_cache()
     end_time = datetime.datetime.now()
     total_training_time = end_time - time0
     print(f"Total training time: {total_training_time}")
 
-    final_evaluation(cfg, device, num_workers, model, loss_function, train_dataset)
+    final_evaluation(cfg, device, num_workers, model,
+                     loss_function, train_dataset)
 
 
 def final_evaluation(cfg, device, num_workers, model, loss_function, train_dataset):
@@ -494,7 +586,8 @@ def final_evaluation(cfg, device, num_workers, model, loss_function, train_datas
     print("=" * 80)
 
     print("\nPreparing test dataset...")
-    _, test_dataset = get_cls_dataset(cfg, split="test", enable_rotation=False, p=0.0)
+    _, test_dataset = get_cls_dataset(
+        cfg, split="test", enable_rotation=False, p=0.0)
     print(f"Test dataset loaded: {len(test_dataset)} samples")
 
     test_loader = DataLoader(
@@ -520,12 +613,14 @@ def final_evaluation(cfg, device, num_workers, model, loss_function, train_datas
 
     print("\nPer-class IoU scores (FG classes + BG):")
     for i, score in enumerate(test_iu_per_class):
-        label = f"Class {i}" if i < len(test_iu_per_class) - 1 else "Background"
+        label = f"Class {i}" if i < len(
+            test_iu_per_class) - 1 else "Background"
         print(f"  {label}: {score*100:.4f}")
 
     print("\nPer-class Dice scores (FG classes + BG):")
     for i, score in enumerate(test_dice_per_class):
-        label = f"Class {i}" if i < len(test_dice_per_class) - 1 else "Background"
+        label = f"Class {i}" if i < len(
+            test_dice_per_class) - 1 else "Background"
         print(f"  {label}: {score*100:.4f}")
 
     print("\n2. Generating CAMs for complete training dataset...")
@@ -549,7 +644,8 @@ def final_evaluation(cfg, device, num_workers, model, loss_function, train_datas
         checkpoint = torch.load(best_model_path, map_location=device)
         model.load_state_dict(checkpoint["model"])
         best_iter = checkpoint.get("iter", "unknown")
-        print(f"Best model loaded successfully! (Saved at iteration: {best_iter})")
+        print(
+            f"Best model loaded successfully! (Saved at iteration: {best_iter})")
     else:
         print("Warning: Best model checkpoint not found, using current model state")
         print(f"Expected path: {best_model_path}")
@@ -568,8 +664,10 @@ def main():
     cfg.work_dir.dir = os.path.dirname(args.config)
     timestamp = "{0:%Y-%m-%d-%H-%M}".format(datetime.datetime.now())
 
-    cfg.work_dir.ckpt_dir = os.path.join(cfg.work_dir.dir, cfg.work_dir.ckpt_dir, timestamp)
-    cfg.work_dir.pred_dir = os.path.join(cfg.work_dir.dir, cfg.work_dir.pred_dir)
+    cfg.work_dir.ckpt_dir = os.path.join(
+        cfg.work_dir.dir, cfg.work_dir.ckpt_dir, timestamp)
+    cfg.work_dir.pred_dir = os.path.join(
+        cfg.work_dir.dir, cfg.work_dir.pred_dir)
 
     os.makedirs(cfg.work_dir.dir, exist_ok=True)
     os.makedirs(cfg.work_dir.ckpt_dir, exist_ok=True)

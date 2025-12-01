@@ -1,3 +1,8 @@
+from utils.validate import validate
+from utils.trainutils import get_cls_dataset, get_mean_std
+from utils.pyutils import set_seed
+from model.conch_adapter import ConchAdapter
+from model.model import ClsNetwork
 import argparse
 import os
 import sys
@@ -12,26 +17,28 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from model.model import ClsNetwork
-from model.conch_adapter import ConchAdapter
-from utils.pyutils import set_seed
-from utils.trainutils import get_cls_dataset
-from utils.validate import validate
-
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Evaluate a trained model on a split and report segmentation metrics.")
-    parser.add_argument("--config", required=True, type=str, help="Path to the config file.")
-    parser.add_argument("--checkpoint", required=True, type=str, help="Path to the model checkpoint (best_cam.pth).")
-    parser.add_argument("--split", default="test", choices=["test", "valid"], help="Dataset split to evaluate.")
-    parser.add_argument("--batch-size", type=int, default=1, help="Batch size for evaluation loader.")
-    parser.add_argument("--num-workers", type=int, default=8, help="Number of DataLoader workers.")
+    parser = argparse.ArgumentParser(
+        description="Evaluate a trained model on a split and report segmentation metrics.")
+    parser.add_argument("--config", required=True, type=str,
+                        help="Path to the config file.")
+    parser.add_argument("--checkpoint", required=True, type=str,
+                        help="Path to the model checkpoint (best_cam.pth).")
+    parser.add_argument("--split", default="test",
+                        choices=["test", "valid"], help="Dataset split to evaluate.")
+    parser.add_argument("--batch-size", type=int, default=1,
+                        help="Batch size for evaluation loader.")
+    parser.add_argument("--num-workers", type=int, default=8,
+                        help="Number of DataLoader workers.")
     parser.add_argument("--gpu", type=int, default=0, help="GPU id to use.")
     return parser.parse_args()
 
+
 def build_clip_adapter(cfg, device):
     clip_cfg = getattr(cfg, "clip", None)
-    clip_cfg = OmegaConf.to_container(clip_cfg, resolve=True) if clip_cfg is not None else {}
+    clip_cfg = OmegaConf.to_container(
+        clip_cfg, resolve=True) if clip_cfg is not None else {}
     model_name = clip_cfg.get("model_name", "conch_ViT-B-16")
     checkpoint_path = clip_cfg.get("checkpoint_path")
     cache_dir = clip_cfg.get("cache_dir")
@@ -52,8 +59,12 @@ def build_clip_adapter(cfg, device):
         freeze=freeze,
     )
 
+
 def build_model(cfg, checkpoint_path, device):
     clip_adapter = build_clip_adapter(cfg, device)
+    guidance_cfg = OmegaConf.to_container(
+        getattr(cfg.model, "segformer_guidance", {}), resolve=True)
+    input_mean, input_std = get_mean_std(cfg.dataset.name)
     model = ClsNetwork(
         backbone=cfg.model.backbone.config,
         stride=cfg.model.backbone.stride,
@@ -66,13 +77,24 @@ def build_model(cfg, checkpoint_path, device):
         enable_text_fusion=getattr(cfg.model, "enable_text_fusion", True),
         text_prompts=getattr(cfg.model, "text_prompts", None),
         fusion_dim=getattr(cfg.model, "fusion_dim", None),
-        learnable_text_prompt=getattr(cfg.model, "learnable_text_prompt", False),
+        learnable_text_prompt=getattr(
+            cfg.model, "learnable_text_prompt", False),
         prompt_init_scale=getattr(cfg.model, "prompt_init_scale", 0.02),
-        prototype_init_mode=getattr(cfg.model, "prototype_init_mode", "text_learnable"),
-        prototype_text_noise_std=getattr(cfg.model, "prototype_text_noise_std", 0.02),
+        prototype_init_mode=getattr(
+            cfg.model, "prototype_init_mode", "text_learnable"),
+        prototype_text_noise_std=getattr(
+            cfg.model, "prototype_text_noise_std", 0.02),
         use_ctx_prompt=getattr(cfg.model, "use_ctx_prompt", False),
         ctx_prompt_len=getattr(cfg.model, "ctx_prompt_len", 8),
         ctx_class_specific=getattr(cfg.model, "ctx_class_specific", False),
+        enable_segformer_guidance=guidance_cfg.get("enable", False),
+        segformer_backbone=guidance_cfg.get("backbone", "mit_b1"),
+        segformer_checkpoint=guidance_cfg.get("checkpoint", None),
+        guidance_layers=tuple(guidance_cfg.get("layers", (2,))),
+        train_clip_visual=guidance_cfg.get("train_clip_visual", None),
+        input_mean=input_mean,
+        input_std=input_std,
+        use_structure_adapter=guidance_cfg.get("use_structure_adapter", False),
     )
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -86,7 +108,8 @@ def build_model(cfg, checkpoint_path, device):
 def main():
     args = parse_args()
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for evaluation; no GPU was detected.")
+        raise RuntimeError(
+            "CUDA is required for evaluation; no GPU was detected.")
 
     torch.cuda.set_device(args.gpu)
     device = torch.device(f"cuda:{args.gpu}")
@@ -98,7 +121,8 @@ def main():
     model = build_model(cfg, args.checkpoint, device)
 
     print(f"Preparing {args.split} dataset...")
-    _, eval_dataset = get_cls_dataset(cfg, split=args.split, enable_rotation=False, p=0.0)
+    _, eval_dataset = get_cls_dataset(
+        cfg, split=args.split, enable_rotation=False, p=0.0)
     eval_loader = DataLoader(
         eval_dataset,
         batch_size=args.batch_size,
@@ -140,7 +164,8 @@ def main():
         for i, (iou, dice) in enumerate(zip(iou_per_class, dice_per_class)):
             if i == len(iou_per_class) - 1:
                 continue  # background
-            print(f"Class {i}: IoU={iou.item() * 100:.4f}%  Dice={dice.item() * 100:.4f}%")
+            print(
+                f"Class {i}: IoU={iou.item() * 100:.4f}%  Dice={dice.item() * 100:.4f}%")
     print("=" * 68 + "\n")
 
 

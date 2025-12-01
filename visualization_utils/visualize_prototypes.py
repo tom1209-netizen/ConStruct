@@ -1,3 +1,16 @@
+from utils.trainutils import get_mean_std
+from utils.validate import fuse_cams_with_weights, get_seg_label
+from utils.hierarchical_utils import merge_subclass_cams_to_parent
+from model.conch_adapter import ConchAdapter
+from model.model import ClsNetwork
+from tqdm import tqdm
+from PIL import Image
+from omegaconf import OmegaConf
+from albumentations.pytorch import ToTensorV2
+import torch.nn.functional as F
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
 import argparse
 import os
 import sys
@@ -8,23 +21,11 @@ import albumentations as A
 import cv2
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import numpy as np
-import torch
-import torch.nn.functional as F
-from albumentations.pytorch import ToTensorV2
-from omegaconf import OmegaConf
-from PIL import Image
-from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from model.model import ClsNetwork
-from model.conch_adapter import ConchAdapter
-from utils.hierarchical_utils import merge_subclass_cams_to_parent
-from utils.validate import fuse_cams_with_weights, get_seg_label
 
 warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib")
 
@@ -33,7 +34,7 @@ DEFAULT_PALETTE = [
     [0, 255, 0],    # 1: STR (Green)
     [0, 0, 255],    # 2: LYM (Blue)
     [153, 0, 255],  # 3: NEC (Purple)
-    [255, 255, 255] # Background
+    [255, 255, 255]  # Background
 ]
 DEFAULT_CLASS_NAMES = ["TUM", "STR", "LYM", "NEC"]
 
@@ -52,14 +53,16 @@ def load_color_mask(mask_path, palette):
         mask_np = np.array(Image.open(mask_path))
     except FileNotFoundError:
         return np.zeros((224, 224, 3), dtype=np.uint8)
-    color_mask = np.zeros((mask_np.shape[0], mask_np.shape[1], 3), dtype=np.uint8)
+    color_mask = np.zeros(
+        (mask_np.shape[0], mask_np.shape[1], 3), dtype=np.uint8)
     for class_idx, color in enumerate(palette):
         color_mask[mask_np == class_idx] = color
     return color_mask
 
 
 def generate_heatmap(image_bgr, activation_map):
-    heatmap = cv2.applyColorMap(np.uint8(255 * activation_map), cv2.COLORMAP_JET)
+    heatmap = cv2.applyColorMap(
+        np.uint8(255 * activation_map), cv2.COLORMAP_JET)
     heatmap = np.float32(heatmap) / 255
     image_float = np.float32(image_bgr) / 255
     overlay = cv2.addWeighted(image_float, 0.5, heatmap, 0.5, 0)
@@ -119,7 +122,8 @@ def get_prototype_slices(k_list):
 def build_model(cfg, checkpoint_path, device):
     clip_adapter = None
     if cfg.model.backbone.config.startswith("conch"):
-        clip_cfg = OmegaConf.to_container(getattr(cfg, "clip", None) or {}, resolve=True)
+        clip_cfg = OmegaConf.to_container(
+            getattr(cfg, "clip", None) or {}, resolve=True)
         clip_adapter = ConchAdapter(
             model_name=clip_cfg.get("model_name", "conch_ViT-B-16"),
             checkpoint_path=clip_cfg.get("checkpoint_path"),
@@ -131,6 +135,9 @@ def build_model(cfg, checkpoint_path, device):
             proj_contrast=clip_cfg.get("proj_contrast", False),
             freeze=clip_cfg.get("freeze", True),
         )
+    guidance_cfg = OmegaConf.to_container(
+        getattr(cfg.model, "segformer_guidance", {}), resolve=True)
+    input_mean, input_std = get_mean_std(cfg.dataset.name)
     model = ClsNetwork(
         backbone=cfg.model.backbone.config,
         stride=cfg.model.backbone.stride,
@@ -143,13 +150,24 @@ def build_model(cfg, checkpoint_path, device):
         enable_text_fusion=getattr(cfg.model, "enable_text_fusion", True),
         text_prompts=getattr(cfg.model, "text_prompts", None),
         fusion_dim=getattr(cfg.model, "fusion_dim", None),
-        learnable_text_prompt=getattr(cfg.model, "learnable_text_prompt", False),
+        learnable_text_prompt=getattr(
+            cfg.model, "learnable_text_prompt", False),
         prompt_init_scale=getattr(cfg.model, "prompt_init_scale", 0.02),
-        prototype_init_mode=getattr(cfg.model, "prototype_init_mode", "text_learnable"),
-        prototype_text_noise_std=getattr(cfg.model, "prototype_text_noise_std", 0.02),
+        prototype_init_mode=getattr(
+            cfg.model, "prototype_init_mode", "text_learnable"),
+        prototype_text_noise_std=getattr(
+            cfg.model, "prototype_text_noise_std", 0.02),
         use_ctx_prompt=getattr(cfg.model, "use_ctx_prompt", False),
         ctx_prompt_len=getattr(cfg.model, "ctx_prompt_len", 8),
         ctx_class_specific=getattr(cfg.model, "ctx_class_specific", False),
+        enable_segformer_guidance=guidance_cfg.get("enable", False),
+        segformer_backbone=guidance_cfg.get("backbone", "mit_b1"),
+        segformer_checkpoint=guidance_cfg.get("checkpoint", None),
+        guidance_layers=tuple(guidance_cfg.get("layers", (2,))),
+        train_clip_visual=guidance_cfg.get("train_clip_visual", None),
+        input_mean=input_mean,
+        input_std=input_std,
+        use_structure_adapter=guidance_cfg.get("use_structure_adapter", False),
     )
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint["model"], strict=False)
@@ -184,18 +202,23 @@ def predict_mask(model, image_tensor, cls_label, cfg, palette):
         cam3 = merge_subclass_cams_to_parent(cam3, k_list, method=merge_method)
         cam4 = merge_subclass_cams_to_parent(cam4, k_list, method=merge_method)
 
-        cam2 = get_seg_label(cam2, image_tensor, cls_label).to(image_tensor.device)
-        cam3 = get_seg_label(cam3, image_tensor, cls_label).to(image_tensor.device)
-        cam4 = get_seg_label(cam4, image_tensor, cls_label).to(image_tensor.device)
+        cam2 = get_seg_label(cam2, image_tensor, cls_label).to(
+            image_tensor.device)
+        cam3 = get_seg_label(cam3, image_tensor, cls_label).to(
+            image_tensor.device)
+        cam4 = get_seg_label(cam4, image_tensor, cls_label).to(
+            image_tensor.device)
 
         fuse234 = fuse_cams_with_weights(cam2, cam3, cam4, cam_weights)
         cam_max = torch.max(fuse234, dim=1, keepdim=True)[0]
         bg_cam = (1 - cam_max) ** 10
         full_probs_tensor = torch.cat([fuse234, bg_cam], dim=1)
         probs = torch.softmax(full_probs_tensor, dim=1)
-        pred_mask = torch.argmax(probs, dim=1).squeeze(0).cpu().numpy().astype(np.uint8)
+        pred_mask = torch.argmax(probs, dim=1).squeeze(
+            0).cpu().numpy().astype(np.uint8)
 
-    color_mask = np.zeros((pred_mask.shape[0], pred_mask.shape[1], 3), dtype=np.uint8)
+    color_mask = np.zeros(
+        (pred_mask.shape[0], pred_mask.shape[1], 3), dtype=np.uint8)
     for idx, color in enumerate(palette):
         color_mask[pred_mask == idx] = color
     return color_mask
@@ -222,7 +245,8 @@ def save_activation_grid(
     num_cols = max(max_protos, 2) + 1  # one column for labels
     num_rows = 1 + num_classes
 
-    fig, axes = plt.subplots(num_rows, num_cols, figsize=(num_cols * 3, num_rows * 3))
+    fig, axes = plt.subplots(
+        num_rows, num_cols, figsize=(num_cols * 3, num_rows * 3))
     axes = np.atleast_2d(axes)
     for ax in axes.ravel():
         ax.axis("off")
@@ -249,24 +273,33 @@ def save_activation_grid(
         for rank, proto_idx in enumerate(indices):
             col_idx = 1 + rank
             act_map = get_activation_map(
-                feature_map, projected_prototypes, proto_idx, (image_rgb.shape[0], image_rgb.shape[1])
+                feature_map, projected_prototypes, proto_idx, (
+                    image_rgb.shape[0], image_rgb.shape[1])
             )
             heatmap = generate_heatmap(image_bgr, act_map)
-            axes[row_idx, col_idx].imshow(cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB))
-            
+            axes[row_idx, col_idx].imshow(
+                cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB))
+
     plt.tight_layout(pad=1.0, h_pad=1.0, w_pad=1.0)
-    out_path = os.path.join(out_dir, f"{base_name}_{model_label}_prototypes.png")
+    out_path = os.path.join(
+        out_dir, f"{base_name}_{model_label}_prototypes.png")
     fig.savefig(out_path, bbox_inches="tight", dpi=150)
     plt.close(fig)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Visualize where each prototype focuses for a set of images.")
-    parser.add_argument("--config", type=str, required=True, help="Path to the training config.yaml file.")
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to the trained best_cam.pth checkpoint.")
-    parser.add_argument("--images", type=str, nargs="+", required=True, help="List of image filenames to visualize.")
-    parser.add_argument("--split", type=str, default="test", choices=["test", "valid"], help="Dataset split to load.")
-    parser.add_argument("--out-dir", type=str, default="./prototype_visualizations", help="Where to save outputs.")
+    parser = argparse.ArgumentParser(
+        description="Visualize where each prototype focuses for a set of images.")
+    parser.add_argument("--config", type=str, required=True,
+                        help="Path to the training config.yaml file.")
+    parser.add_argument("--checkpoint", type=str, required=True,
+                        help="Path to the trained best_cam.pth checkpoint.")
+    parser.add_argument("--images", type=str, nargs="+",
+                        required=True, help="List of image filenames to visualize.")
+    parser.add_argument("--split", type=str, default="test",
+                        choices=["test", "valid"], help="Dataset split to load.")
+    parser.add_argument("--out-dir", type=str,
+                        default="./prototype_visualizations", help="Where to save outputs.")
     parser.add_argument("--gpu", type=int, default=0, help="GPU id to use.")
     return parser.parse_args()
 
@@ -274,14 +307,16 @@ def parse_args():
 def main():
     args = parse_args()
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for prototype visualization; no GPU was detected.")
+        raise RuntimeError(
+            "CUDA is required for prototype visualization; no GPU was detected.")
 
     torch.cuda.set_device(args.gpu)
     device = torch.device(f"cuda:{args.gpu}")
 
     cfg = OmegaConf.load(args.config)
     model = build_model(cfg, args.checkpoint, device)
-    k_list = list(getattr(model, "k_list", [cfg.model.num_prototypes_per_class] * cfg.dataset.cls_num_classes))
+    k_list = list(getattr(model, "k_list", [
+                  cfg.model.num_prototypes_per_class] * cfg.dataset.cls_num_classes))
     proto_slices = get_prototype_slices(k_list)
     class_names = resolve_class_names(cfg, cfg.dataset.cls_num_classes)
     transform = get_validation_transform()
@@ -291,8 +326,10 @@ def main():
 
     print(f"Processing {len(args.images)} images...")
     for img_name in tqdm(args.images, desc="Images"):
-        img_path = os.path.join(cfg.dataset.val_root, args.split, "img", img_name)
-        mask_path = os.path.join(cfg.dataset.val_root, args.split, "mask", img_name)
+        img_path = os.path.join(cfg.dataset.val_root,
+                                args.split, "img", img_name)
+        mask_path = os.path.join(cfg.dataset.val_root,
+                                 args.split, "mask", img_name)
 
         if not os.path.exists(img_path):
             print(f"  Skipping {img_name}: not found at {img_path}")
@@ -310,18 +347,22 @@ def main():
             except Exception:
                 mask_np = None
         mask_color = load_color_mask(mask_path, DEFAULT_PALETTE)
-        image_tensor = transform(image=image_rgb)["image"].unsqueeze(0).to(device)
+        image_tensor = transform(image=image_rgb)[
+            "image"].unsqueeze(0).to(device)
 
         cls_label = torch.ones(1, cfg.dataset.cls_num_classes, device=device)
         if mask_np is not None:
-            cls_label_np = np.zeros(cfg.dataset.cls_num_classes, dtype=np.float32)
+            cls_label_np = np.zeros(
+                cfg.dataset.cls_num_classes, dtype=np.float32)
             present = np.unique(mask_np)
             present = present[present < cfg.dataset.cls_num_classes]
             cls_label_np[present] = 1
             cls_label = torch.from_numpy(cls_label_np).unsqueeze(0).to(device)
 
-        feature_map, projected = extract_features_and_prototypes(model, image_tensor)
-        pred_mask_color = predict_mask(model, image_tensor, cls_label, cfg, DEFAULT_PALETTE)
+        feature_map, projected = extract_features_and_prototypes(
+            model, image_tensor)
+        pred_mask_color = predict_mask(
+            model, image_tensor, cls_label, cfg, DEFAULT_PALETTE)
         base_name = Path(img_name).stem
         save_activation_grid(
             image_rgb=image_rgb,

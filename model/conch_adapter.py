@@ -54,17 +54,21 @@ class ConchAdapter(nn.Module):
         if self.embed_dim is None and hasattr(self.model, "text_projection"):
             self.embed_dim = self.model.text_projection.shape[1]
         if self.embed_dim is None:
-            raise RuntimeError("Unable to infer CONCH embed_dim from loaded model.")
+            raise RuntimeError(
+                "Unable to infer CONCH embed_dim from loaded model.")
 
         visual = getattr(self.model, "visual", None)
-        self.image_size = getattr(visual, "image_size", force_image_size or 448)
+        self.image_size = getattr(
+            visual, "image_size", force_image_size or 448)
         self.image_mean = getattr(visual, "image_mean", (0.5, 0.5, 0.5))
         self.image_std = getattr(visual, "image_std", (0.5, 0.5, 0.5))
 
         if freeze:
             for p in self.model.parameters():
                 p.requires_grad_(False)
-        self.model.eval()
+            self.model.eval()
+        else:
+            self.model.train()
 
     def _load_model(self):
         """
@@ -75,7 +79,8 @@ class ConchAdapter(nn.Module):
         checkpoint = self.hf_hub or self.checkpoint_path
         model_cfg = self.model_name
         if checkpoint is None:
-            raise ValueError("Please provide `checkpoint_path` or `hf_hub` in cfg.clip to load CONCH weights.")
+            raise ValueError(
+                "Please provide `checkpoint_path` or `hf_hub` in cfg.clip to load CONCH weights.")
 
         model, preprocess = create_model_from_pretrained(
             model_cfg,
@@ -87,7 +92,7 @@ class ConchAdapter(nn.Module):
         )
         return model, preprocess
 
-    # Text 
+    # Text
     def tokenize(self, texts: Union[str, Iterable[str]]) -> torch.Tensor:
         """Tokenize raw strings using CONCH's tokenizer."""
         if isinstance(texts, str):
@@ -105,7 +110,8 @@ class ConchAdapter(nn.Module):
 
     def encode_text_tokens(self, token_ids: torch.Tensor, normalize: bool = True) -> torch.Tensor:
         with torch.no_grad():
-            text_latent = self.model.encode_text(token_ids.to(self.device), normalize=normalize)
+            text_latent = self.model.encode_text(
+                token_ids.to(self.device), normalize=normalize)
         return text_latent
 
     # Image
@@ -117,11 +123,12 @@ class ConchAdapter(nn.Module):
         """
         proj = self.proj_contrast
         with torch.no_grad():
-            feats = self.model.encode_image(images.to(self.device), normalize=normalize, proj_contrast=proj)
+            feats = self.model.encode_image(
+                images.to(self.device), normalize=normalize, proj_contrast=proj)
         return feats
 
     # Multi-scale features
-    def visual_intermediates(self, images: torch.Tensor) -> List[torch.Tensor]:
+    def visual_intermediates(self, images: torch.Tensor, use_grad: bool = False) -> List[torch.Tensor]:
         """
         Build a 4-level feature pyramid by tapping intermediate ViT blocks
         (SETR/UPerNet style):
@@ -132,6 +139,12 @@ class ConchAdapter(nn.Module):
 
         If intermediate blocks are unavailable, it falls back to pooling the
         final token map.
+
+        Args:
+            images: Input batch in the same normalization space expected by CONCH.
+            use_grad: When True, keep the computation graph so ViT blocks can be
+                fine-tuned (needed for structural distillation). Default keeps
+                gradients detached for efficiency.
         """
         images = images.to(self.device)
 
@@ -154,7 +167,8 @@ class ConchAdapter(nn.Module):
                 if idx >= len(trunk.blocks):
                     continue
                 hooks.append(
-                    trunk.blocks[idx].register_forward_hook(lambda _, __, out, idx=idx: outputs.__setitem__(idx, out))
+                    trunk.blocks[idx].register_forward_hook(
+                        lambda _, __, out, idx=idx: outputs.__setitem__(idx, out))
                 )
             try:
                 _ = trunk(images)
@@ -165,17 +179,19 @@ class ConchAdapter(nn.Module):
 
         # 0-indexed block taps for a 12-layer ViT-B
         target_layers = [2, 5, 8, 11]
-        with torch.no_grad():
+        ctx = torch.enable_grad() if use_grad else torch.no_grad()
+        with ctx:
             block_tokens = _collect_vit_blocks(target_layers)
 
         # Fallback if no block captures succeeded
         if not block_tokens:
-            with torch.no_grad():
+            with ctx:
                 _, tokens = self.model._encode_image(images, normalize=False)
             fmap = _tokens_to_map(tokens) if tokens is not None else None
             return [fmap] if fmap is not None else []
 
-        maps = [m for m in (_tokens_to_map(tok) for tok in block_tokens) if m is not None]
+        maps = [m for m in (_tokens_to_map(tok)
+                            for tok in block_tokens) if m is not None]
         if not maps:
             return []
 
@@ -185,8 +201,10 @@ class ConchAdapter(nn.Module):
         maps = maps[:4]
 
         # Build hierarchical resolutions
-        lvl1 = F.interpolate(maps[0], scale_factor=4, mode="bilinear", align_corners=False)
-        lvl2 = F.interpolate(maps[1], scale_factor=2, mode="bilinear", align_corners=False)
+        lvl1 = F.interpolate(maps[0], scale_factor=4,
+                             mode="bilinear", align_corners=False)
+        lvl2 = F.interpolate(maps[1], scale_factor=2,
+                             mode="bilinear", align_corners=False)
         lvl3 = maps[2]
         lvl4 = F.avg_pool2d(maps[3], kernel_size=2, stride=2)
 
@@ -201,7 +219,8 @@ class ConchAdapter(nn.Module):
         device = images.device
         in_mean = torch.tensor(input_mean, device=device).view(1, -1, 1, 1)
         in_std = torch.tensor(input_std, device=device).view(1, -1, 1, 1)
-        tgt_mean = torch.tensor(self.image_mean, device=device).view(1, -1, 1, 1)
+        tgt_mean = torch.tensor(
+            self.image_mean, device=device).view(1, -1, 1, 1)
         tgt_std = torch.tensor(self.image_std, device=device).view(1, -1, 1, 1)
 
         images = images * in_std + in_mean

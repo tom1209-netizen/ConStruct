@@ -1,4 +1,5 @@
 import math
+import os
 import pickle as pkl
 from functools import partial
 from typing import Optional, Union, List
@@ -10,6 +11,68 @@ from timm.models.layers import trunc_normal_
 
 from model.segform import mix_transformer
 from model.conch_adapter import ConchAdapter
+
+
+class StructuralConsistencyLoss(nn.Module):
+    """
+    Relational distillation loss: matches pairwise token affinities between
+    student (ViT) and teacher (SegFormer) feature maps after spatial alignment.
+    """
+
+    def forward(self, student_map: torch.Tensor, teacher_map: torch.Tensor) -> torch.Tensor:
+        if student_map is None or teacher_map is None:
+            raise ValueError("student_map and teacher_map must not be None")
+
+        b, c_s, h, w = student_map.shape
+        teacher_map = F.interpolate(teacher_map, size=(
+            h, w), mode="bilinear", align_corners=False)
+
+        # Downsample very large maps to keep affinity matrices memory-friendly
+        max_side = 64
+        if h > max_side or w > max_side:
+            student_map = F.adaptive_avg_pool2d(
+                student_map, (max_side, max_side))
+            teacher_map = F.adaptive_avg_pool2d(
+                teacher_map, (max_side, max_side))
+            b, c_s, h, w = student_map.shape
+
+        student_tokens = student_map.view(
+            b, c_s, -1).transpose(1, 2)  # [B, HW, Cs]
+        teacher_tokens = teacher_map.view(
+            b, teacher_map.shape[1], -1).transpose(1, 2)  # [B, HW, Ct]
+
+        student_tokens = F.normalize(student_tokens, dim=-1)
+        teacher_tokens = F.normalize(teacher_tokens, dim=-1)
+
+        student_affinity = torch.bmm(
+            student_tokens, student_tokens.transpose(1, 2))
+        teacher_affinity = torch.bmm(
+            teacher_tokens, teacher_tokens.transpose(1, 2))
+
+        return F.mse_loss(student_affinity, teacher_affinity)
+
+
+class FeatureRefinementHead(nn.Module):
+    """
+    Lightweight adapter to sharpen frozen CONCH features before distillation/CAMs.
+    Channel-mixing + depthwise spatial filtering preserves efficiency.
+    """
+
+    def __init__(self, dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(dim, dim, 1),
+            nn.BatchNorm2d(dim),
+            nn.GELU(),
+            nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim),
+            nn.BatchNorm2d(dim),
+            nn.GELU(),
+            nn.Conv2d(dim, dim, 1),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
 
 class AdaptiveLayer(nn.Module):
     def __init__(self, in_dim, n_ratio, out_dim):
@@ -43,6 +106,7 @@ class TextPromptEncoder(nn.Module):
     class descriptions into normalized embeddings that can be learned via
     a small projection head.
     """
+
     def __init__(
         self,
         cls_num_classes: int,
@@ -58,7 +122,8 @@ class TextPromptEncoder(nn.Module):
         super().__init__()
         self.clip_adapter = clip_adapter
         self.learnable_prompt = learnable_prompt
-        self.use_ctx_prompt = False  # Context prompts are not wired for CONCH text yet.
+        # Context prompts are not wired for CONCH text yet.
+        self.use_ctx_prompt = False
         self.n_ctx = ctx_prompt_len
         self.ctx_class_specific = ctx_class_specific
 
@@ -67,7 +132,8 @@ class TextPromptEncoder(nn.Module):
             prompts = [prompts]
         prompts = [str(p) for p in prompts]
         self.prompts = prompts
-        self.register_buffer("prompt_token_ids", clip_adapter.tokenize(prompts), persistent=False)
+        self.register_buffer("prompt_token_ids",
+                             clip_adapter.tokenize(prompts), persistent=False)
 
         self.text_dim = clip_adapter.embed_dim
         proj_dim = projection_dim or self.text_dim
@@ -115,6 +181,7 @@ class TextGuidedCamFusion(nn.Module):
     Computes per-class attention over CAM scales using text prompts as queries
     and pooled image/prototype features as keys/values.
     """
+
     def __init__(
         self,
         cls_num_classes,
@@ -163,7 +230,8 @@ class TextGuidedCamFusion(nn.Module):
         projected_prototypes: list of [P, C] projected prototypes per level
         """
         if len(pooled_features) != len(projected_prototypes):
-            raise ValueError("pooled_features and projected_prototypes must have the same length")
+            raise ValueError(
+                "pooled_features and projected_prototypes must have the same length")
 
         device = pooled_features[0].device
         text_features = self.text_encoder(device)  # [num_classes, fusion_dim]
@@ -171,7 +239,8 @@ class TextGuidedCamFusion(nn.Module):
 
         image_contexts = []
         for pooled, proto, projector in zip(pooled_features, projected_prototypes, self.image_projectors):
-            proto_ctx = proto.mean(dim=0, keepdim=True).expand(pooled.shape[0], -1)
+            proto_ctx = proto.mean(dim=0, keepdim=True).expand(
+                pooled.shape[0], -1)
             fused = torch.cat([pooled, proto_ctx], dim=1)
             fused = projector(fused)
             image_contexts.append(F.normalize(fused, dim=-1))
@@ -189,25 +258,34 @@ class TextGuidedCamFusion(nn.Module):
 
 class ClsNetwork(nn.Module):
     def __init__(self,
-        backbone='mit_b1',
-        cls_num_classes=4,
-        num_prototypes_per_class=10,
-        prototype_feature_dim=512,
-        clip_adapter: Optional[ConchAdapter] = None,
-        stride=[4, 2, 2, 1],
-        pretrained=True,
-        n_ratio=0.5,
-        enable_text_fusion=True,
-        text_prompts=None,
-        fusion_dim=None,
-        learnable_text_prompt=True,
-        prompt_init_scale=0.02,
-        prototype_init_mode="text_learnable",  # ["random", "text_fixed", "text_learnable", "text_prompt_tuned"]
-        prototype_text_noise_std=0.02,
-        use_ctx_prompt=False,
-        ctx_prompt_len=8,
-        ctx_class_specific=False,
-    ):
+                 backbone='mit_b1',
+                 cls_num_classes=4,
+                 num_prototypes_per_class=10,
+                 prototype_feature_dim=512,
+                 clip_adapter: Optional[ConchAdapter] = None,
+                 stride=[4, 2, 2, 1],
+                 pretrained=True,
+                 n_ratio=0.5,
+                 enable_text_fusion=True,
+                 text_prompts=None,
+                 fusion_dim=None,
+                 learnable_text_prompt=True,
+                 prompt_init_scale=0.02,
+                 # ["random", "text_fixed", "text_learnable", "text_prompt_tuned"]
+                 prototype_init_mode="text_learnable",
+                 prototype_text_noise_std=0.02,
+                 use_ctx_prompt=False,
+                 ctx_prompt_len=8,
+                 ctx_class_specific=False,
+                 enable_segformer_guidance=True,
+                 segformer_backbone="mit_b1",
+                 segformer_checkpoint: Optional[str] = None,
+                 guidance_layers=(2,),
+                 train_clip_visual: Optional[bool] = None,
+                 input_mean: Optional[Union[list, tuple]] = None,
+                 input_std: Optional[Union[list, tuple]] = None,
+                 use_structure_adapter: bool = False,
+                 ):
         super().__init__()
         self.cls_num_classes = cls_num_classes
         self.num_prototypes_per_class = num_prototypes_per_class
@@ -216,6 +294,10 @@ class ClsNetwork(nn.Module):
         self.cam_fusion_levels = (1, 2, 3)  # use scales 2,3,4 for fusion
         self.clip_adapter = clip_adapter
         self.clip_visual_dim = None
+        raw_guidance_layers = guidance_layers if guidance_layers is not None else (
+            2,)
+        self.guidance_layers = tuple(
+            int(g) for g in raw_guidance_layers if isinstance(g, int) and g >= 0)
 
         # Align prototype dimensionality with CONCH embedding space when provided
         if self.clip_adapter is not None:
@@ -225,10 +307,23 @@ class ClsNetwork(nn.Module):
         # Backbone Encoder
         self.use_clip_visual = backbone.startswith("conch")
         if self.use_clip_visual and self.clip_adapter is None:
-            raise ValueError("Backbone set to CONCH but clip_adapter is missing.")
+            raise ValueError(
+                "Backbone set to CONCH but clip_adapter is missing.")
+        self.train_clip_visual = train_clip_visual
+        if self.train_clip_visual is None:
+            self.train_clip_visual = self.clip_adapter is not None and not getattr(
+                self.clip_adapter, "freeze", True)
+        self.enable_segformer_guidance = bool(
+            enable_segformer_guidance and self.use_clip_visual)
+        self.segformer_teacher = None
+        self.structural_loss_fn = StructuralConsistencyLoss(
+        ) if self.enable_segformer_guidance else None
+        if self.enable_segformer_guidance and not self.guidance_layers:
+            self.guidance_layers = (2,)
         self.encoder = None
         if self.use_clip_visual:
-            trunk = getattr(getattr(self.clip_adapter.model, "visual", None), "trunk", None)
+            trunk = getattr(getattr(self.clip_adapter.model,
+                            "visual", None), "trunk", None)
             visual_width = (
                 getattr(trunk, "embed_dim", None)
                 or getattr(trunk, "num_features", None)
@@ -236,50 +331,106 @@ class ClsNetwork(nn.Module):
             )
             self.clip_visual_dim = visual_width
             self.in_channels = [visual_width] * 4
+
+            if self.enable_segformer_guidance:
+                self.segformer_teacher = getattr(
+                    mix_transformer, segformer_backbone)(stride=self.stride)
+                teacher_ckpt = segformer_checkpoint or (
+                    f"./pretrained/{segformer_backbone}.pth" if pretrained else None)
+                if teacher_ckpt and os.path.exists(teacher_ckpt):
+                    state_dict = torch.load(teacher_ckpt, map_location="cpu")
+                    state_dict = {k: v for k, v in state_dict.items(
+                    ) if k in self.segformer_teacher.state_dict()}
+                    self.segformer_teacher.load_state_dict(
+                        state_dict, strict=False)
+                elif teacher_ckpt:
+                    raise FileNotFoundError(
+                        f"SegFormer checkpoint not found at {teacher_ckpt}. Aborting to avoid distilling from random weights.")
+                for param in self.segformer_teacher.parameters():
+                    param.requires_grad_(False)
+                self.segformer_teacher.eval()
         else:
-            self.encoder = getattr(mix_transformer, backbone)(stride=self.stride)
+            self.encoder = getattr(
+                mix_transformer, backbone)(stride=self.stride)
             self.in_channels = self.encoder.embed_dims
 
             # Loads pre-trained weights for the backbone (Same as original)
             if pretrained:
-                state_dict = torch.load('./pretrained/'+backbone+'.pth', map_location="cpu")
+                state_dict = torch.load(
+                    './pretrained/'+backbone+'.pth', map_location="cpu")
                 state_dict.pop('head.weight', None)
                 state_dict.pop('head.bias', None)
-                state_dict = {k: v for k, v in state_dict.items() if k in self.encoder.state_dict().keys()}
+                state_dict = {k: v for k, v in state_dict.items(
+                ) if k in self.encoder.state_dict().keys()}
                 self.encoder.load_state_dict(state_dict, strict=False)
 
-        # Learnable Prototypes 
+        # Learnable Prototypes
         # Instead of loading from a file, we create prototypes as a learnable parameter
         # The optimizer will update these vectors during training
-        self.prototypes = nn.Parameter(torch.randn(self.total_prototypes, self.prototype_feature_dim), requires_grad=True)
+        self.prototypes = nn.Parameter(torch.randn(
+            self.total_prototypes, self.prototype_feature_dim), requires_grad=True)
 
-        # Adaptive Layers to Project Prototypes 
+        # Adaptive Layers to Project Prototypes
         # These now project the learnable prototypes to match each of the four feature scales
-        self.l_fc1 = AdaptiveLayer(self.prototype_feature_dim, n_ratio, self.in_channels[0])
-        self.l_fc2 = AdaptiveLayer(self.prototype_feature_dim, n_ratio, self.in_channels[1])
-        self.l_fc3 = AdaptiveLayer(self.prototype_feature_dim, n_ratio, self.in_channels[2])
-        self.l_fc4 = AdaptiveLayer(self.prototype_feature_dim, n_ratio, self.in_channels[3])
+        self.l_fc1 = AdaptiveLayer(
+            self.prototype_feature_dim, n_ratio, self.in_channels[0])
+        self.l_fc2 = AdaptiveLayer(
+            self.prototype_feature_dim, n_ratio, self.in_channels[1])
+        self.l_fc3 = AdaptiveLayer(
+            self.prototype_feature_dim, n_ratio, self.in_channels[2])
+        self.l_fc4 = AdaptiveLayer(
+            self.prototype_feature_dim, n_ratio, self.in_channels[3])
 
         # Other components from the original model are kept for compatibility
         self.pooling = F.adaptive_avg_pool2d
-        
+
         # The k_list (number of prototypes per class) is now generated programmatically.
         # This is needed by the loss function in the training script.
         self.k_list = [self.num_prototypes_per_class] * self.cls_num_classes
-        
+        self.use_structure_adapter = bool(
+            use_structure_adapter and self.use_clip_visual)
+        self.structure_adapters = None
+        if self.use_structure_adapter:
+            self.structure_adapters = nn.ModuleList(
+                [FeatureRefinementHead(ch) for ch in self.in_channels])
+
         # The learnable temperature parameters for cosine similarity are kept.
-        self.logit_scale1 = nn.parameter.Parameter(torch.ones([1]) * (1 / 0.07))
-        self.logit_scale2 = nn.parameter.Parameter(torch.ones([1]) * (1 / 0.07))
-        self.logit_scale3 = nn.parameter.Parameter(torch.ones([1]) * (1 / 0.07))
-        self.logit_scale4 = nn.parameter.Parameter(torch.ones([1]) * (1 / 0.07))
+        self.logit_scale1 = nn.parameter.Parameter(
+            torch.ones([1]) * (1 / 0.07))
+        self.logit_scale2 = nn.parameter.Parameter(
+            torch.ones([1]) * (1 / 0.07))
+        self.logit_scale3 = nn.parameter.Parameter(
+            torch.ones([1]) * (1 / 0.07))
+        self.logit_scale4 = nn.parameter.Parameter(
+            torch.ones([1]) * (1 / 0.07))
 
         self.text_fusion = None
         self.prototype_init_mode = prototype_init_mode
         self.prototype_text_noise_std = prototype_text_noise_std
         self.prototype_initialized = prototype_init_mode == "random"
+        # Input normalization stats (used to re-normalize for SegFormer teacher)
+        mean_list = input_mean if input_mean is not None else [0.0, 0.0, 0.0]
+        std_list = input_std if input_std is not None else [1.0, 1.0, 1.0]
+        self.register_buffer("input_mean", torch.tensor(
+            mean_list, dtype=torch.float32).view(1, 3, 1, 1), persistent=False)
+        self.register_buffer("input_std", torch.tensor(
+            std_list, dtype=torch.float32).view(1, 3, 1, 1), persistent=False)
+        self.register_buffer(
+            "teacher_mean",
+            torch.tensor([0.485, 0.456, 0.406],
+                         dtype=torch.float32).view(1, 3, 1, 1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "teacher_std",
+            torch.tensor([0.229, 0.224, 0.225],
+                         dtype=torch.float32).view(1, 3, 1, 1),
+            persistent=False,
+        )
         if enable_text_fusion:
             fusion_dim_val = fusion_dim or self.prototype_feature_dim
-            level_dims = [self.in_channels[idx] for idx in self.cam_fusion_levels]
+            level_dims = [self.in_channels[idx]
+                          for idx in self.cam_fusion_levels]
             self.text_fusion = TextGuidedCamFusion(
                 cls_num_classes=cls_num_classes,
                 level_dims=level_dims,
@@ -293,7 +444,6 @@ class ClsNetwork(nn.Module):
                 ctx_prompt_len=ctx_prompt_len,
                 ctx_class_specific=ctx_class_specific,
             )
-
 
     def get_param_groups(self):
         regularized = []
@@ -315,7 +465,8 @@ class ClsNetwork(nn.Module):
             return None
         with torch.no_grad():
             text_feats = self.text_fusion.text_encoder(device)  # [C, D]
-            base = text_feats[:, None, :].repeat(1, self.num_prototypes_per_class, 1)
+            base = text_feats[:, None, :].repeat(
+                1, self.num_prototypes_per_class, 1)
             base = base.view(self.total_prototypes, -1)
             if self.prototype_text_noise_std > 0:
                 noise = torch.randn_like(base) * self.prototype_text_noise_std
@@ -328,26 +479,75 @@ class ClsNetwork(nn.Module):
 
     def forward(self, x):
         text_feats_init = self.init_prototypes_from_text(x.device)
+        distill_loss = None
+        teacher_features = None
+        if self.segformer_teacher is not None and self.training:
+            self.segformer_teacher.eval()
+            with torch.no_grad():
+                x_raw = x * \
+                    self.input_std.to(x.device) + self.input_mean.to(x.device)
+                x_seg = (x_raw - self.teacher_mean.to(x.device)) / \
+                    self.teacher_std.to(x.device)
+                teacher_features, _ = self.segformer_teacher(x_seg)
         # Extract multi-scale feature maps
         if self.use_clip_visual:
-            _x_all = self.clip_adapter.visual_intermediates(x)
+            x_raw = x * self.input_std.to(x.device) + \
+                self.input_mean.to(x.device)
+            conch_mean = torch.tensor(
+                [0.5, 0.5, 0.5], device=x.device).view(1, 3, 1, 1)
+            conch_std = torch.tensor(
+                [0.5, 0.5, 0.5], device=x.device).view(1, 3, 1, 1)
+            x_conch = (x_raw - conch_mean) / conch_std
+            if self.use_structure_adapter:
+                with torch.no_grad():
+                    _x_all = self.clip_adapter.visual_intermediates(
+                        x_conch, use_grad=False
+                    )
+                    if not _x_all:
+                        raise RuntimeError(
+                            "CONCH visual encoder did not return any feature maps.")
+                    while len(_x_all) < 4:
+                        _x_all.append(F.avg_pool2d(
+                            _x_all[-1], kernel_size=2, stride=2))
+                # Detach to ensure gradients flow only into adapters
+                _x_all = [f.detach() for f in _x_all]
+                _x_all = [adapter(fmap) for adapter, fmap in zip(
+                    self.structure_adapters, _x_all)]
+            else:
+                _x_all = self.clip_adapter.visual_intermediates(
+                    x_conch, use_grad=(self.train_clip_visual or (
+                        self.enable_segformer_guidance and self.training))
+                )
             if not _x_all:
-                raise RuntimeError("CONCH visual encoder did not return any feature maps.")
+                raise RuntimeError(
+                    "CONCH visual encoder did not return any feature maps.")
             while len(_x_all) < 4:
-                _x_all.append(F.avg_pool2d(_x_all[-1], kernel_size=2, stride=2))
+                _x_all.append(F.avg_pool2d(
+                    _x_all[-1], kernel_size=2, stride=2))
         else:
             _x_all, _ = self.encoder(x)
 
+        if self.structural_loss_fn is not None and teacher_features is not None:
+            guided_losses = []
+            for idx in self.guidance_layers:
+                if idx >= len(_x_all) or idx >= len(teacher_features):
+                    continue
+                guided_losses.append(self.structural_loss_fn(
+                    _x_all[idx], teacher_features[idx]))
+            if guided_losses:
+                distill_loss = sum(guided_losses) / len(guided_losses)
+
         imshapes = [f.shape for f in _x_all]
-        image_features = [f.permute(0, 2, 3, 1).reshape(-1, f.shape[1]) for f in _x_all]
+        image_features = [
+            f.permute(0, 2, 3, 1).reshape(-1, f.shape[1]) for f in _x_all]
         _x1, _x2, _x3, _x4 = image_features
-    
+
         # Projects the single set of learnable prototypes to match the feature dimensions at each scale
         projected_p1 = self.l_fc1(self.prototypes)
         projected_p2 = self.l_fc2(self.prototypes)
         projected_p3 = self.l_fc3(self.prototypes)
         projected_p4 = self.l_fc4(self.prototypes)
-        
+
         # Scale 1 Calculation
         # Normalize pixel features for cosine similarity calculation
         _x1_norm = _x1 / _x1.norm(dim=-1, keepdim=True)
@@ -356,32 +556,36 @@ class ClsNetwork(nn.Module):
         # Calculate cosine similarity between each pixel feature and all projected prototypes
         logits1 = self.logit_scale1 * _x1_norm @ p1_norm.t().float()
         # Reshape the output back into a map [B, C, H, W], where C is the total number of prototypes
-        out1 = logits1.view(imshapes[0][0], imshapes[0][2], imshapes[0][3], -1).permute(0, 3, 1, 2) 
-        cam1 = out1.clone().detach() # The Class Activation Map (CAM)
+        out1 = logits1.view(
+            imshapes[0][0], imshapes[0][2], imshapes[0][3], -1).permute(0, 3, 1, 2)
+        cam1 = out1.clone().detach()  # The Class Activation Map (CAM)
         # Apply Global Average Pooling to the CAM to get the image-level classification score
         cls1 = self.pooling(out1, (1, 1)).view(-1, self.total_prototypes)
 
         # Scale 2 Calculation
         _x2_norm = _x2 / _x2.norm(dim=-1, keepdim=True)
         p2_norm = projected_p2 / projected_p2.norm(dim=-1, keepdim=True)
-        logits2 = self.logit_scale2 * _x2_norm @ p2_norm.t().float() 
-        out2 = logits2.view(imshapes[1][0], imshapes[1][2], imshapes[1][3], -1).permute(0, 3, 1, 2) 
+        logits2 = self.logit_scale2 * _x2_norm @ p2_norm.t().float()
+        out2 = logits2.view(
+            imshapes[1][0], imshapes[1][2], imshapes[1][3], -1).permute(0, 3, 1, 2)
         cam2 = out2.clone().detach()
         cls2 = self.pooling(out2, (1, 1)).view(-1, self.total_prototypes)
 
         # Scale 3 Calculation
         _x3_norm = _x3 / _x3.norm(dim=-1, keepdim=True)
         p3_norm = projected_p3 / projected_p3.norm(dim=-1, keepdim=True)
-        logits3 = self.logit_scale3 * _x3_norm @ p3_norm.t().float() 
-        out3 = logits3.view(imshapes[2][0], imshapes[2][2], imshapes[2][3], -1).permute(0, 3, 1, 2) 
+        logits3 = self.logit_scale3 * _x3_norm @ p3_norm.t().float()
+        out3 = logits3.view(
+            imshapes[2][0], imshapes[2][2], imshapes[2][3], -1).permute(0, 3, 1, 2)
         cam3 = out3.clone().detach()
         cls3 = self.pooling(out3, (1, 1)).view(-1, self.total_prototypes)
 
-        # Scale 4 Calculation 
+        # Scale 4 Calculation
         _x4_norm = _x4 / _x4.norm(dim=-1, keepdim=True)
         p4_norm = projected_p4 / projected_p4.norm(dim=-1, keepdim=True)
-        logits4 = self.logit_scale4 * _x4_norm @ p4_norm.t().float() 
-        out4 = logits4.view(imshapes[3][0], imshapes[3][2], imshapes[3][3], -1).permute(0, 3, 1, 2) 
+        logits4 = self.logit_scale4 * _x4_norm @ p4_norm.t().float()
+        out4 = logits4.view(
+            imshapes[3][0], imshapes[3][2], imshapes[3][3], -1).permute(0, 3, 1, 2)
         # For the final layer's CAM, we keep the gradient attached for the contrastive loss
         cam4 = out4.clone()
         cls4 = self.pooling(out4, (1, 1)).view(-1, self.total_prototypes)
@@ -396,8 +600,9 @@ class ClsNetwork(nn.Module):
                 for idx in self.cam_fusion_levels
             ]
             proto_levels = [projected_p2, projected_p3, projected_p4]
-            fusion_out = self.text_fusion(pooled_feats, proto_levels, return_text=True)
+            fusion_out = self.text_fusion(
+                pooled_feats, proto_levels, return_text=True)
             cam_weights, text_features_out = fusion_out
 
-        return (cls1, cam1, cls2, cam2, cls3, cam3, cls4, cam4, 
-                self.prototypes, self.k_list, feature_map_for_diversity, cam_weights, projected_p4, text_features_out)
+        return (cls1, cam1, cls2, cam2, cls3, cam3, cls4, cam4,
+                self.prototypes, self.k_list, feature_map_for_diversity, cam_weights, projected_p4, text_features_out, distill_loss)
