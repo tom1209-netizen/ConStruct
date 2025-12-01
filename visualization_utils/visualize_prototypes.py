@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from model.model import ClsNetwork
+from model.conch_adapter import ConchAdapter
 from utils.hierarchical_utils import merge_subclass_cams_to_parent
 from utils.validate import fuse_cams_with_weights, get_seg_label
 
@@ -116,12 +117,27 @@ def get_prototype_slices(k_list):
 
 
 def build_model(cfg, checkpoint_path, device):
+    clip_adapter = None
+    if cfg.model.backbone.config.startswith("conch"):
+        clip_cfg = OmegaConf.to_container(getattr(cfg, "clip", None) or {}, resolve=True)
+        clip_adapter = ConchAdapter(
+            model_name=clip_cfg.get("model_name", "conch_ViT-B-16"),
+            checkpoint_path=clip_cfg.get("checkpoint_path"),
+            device=device,
+            force_image_size=clip_cfg.get("force_image_size"),
+            cache_dir=clip_cfg.get("cache_dir"),
+            hf_hub=clip_cfg.get("hf_hub"),
+            hf_token=clip_cfg.get("hf_token"),
+            proj_contrast=clip_cfg.get("proj_contrast", False),
+            freeze=clip_cfg.get("freeze", True),
+        )
     model = ClsNetwork(
         backbone=cfg.model.backbone.config,
         stride=cfg.model.backbone.stride,
         cls_num_classes=cfg.dataset.cls_num_classes,
         num_prototypes_per_class=cfg.model.num_prototypes_per_class,
         prototype_feature_dim=cfg.model.prototype_feature_dim,
+        clip_adapter=clip_adapter,
         n_ratio=cfg.model.n_ratio,
         pretrained=False,
         enable_text_fusion=getattr(cfg.model, "enable_text_fusion", True),

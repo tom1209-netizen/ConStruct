@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from model.model import ClsNetwork
+from model.conch_adapter import ConchAdapter
 from utils.pyutils import set_seed
 from utils.trainutils import get_cls_dataset
 from utils.validate import validate
@@ -28,14 +29,38 @@ def parse_args():
     parser.add_argument("--gpu", type=int, default=0, help="GPU id to use.")
     return parser.parse_args()
 
+def build_clip_adapter(cfg, device):
+    clip_cfg = getattr(cfg, "clip", None)
+    clip_cfg = OmegaConf.to_container(clip_cfg, resolve=True) if clip_cfg is not None else {}
+    model_name = clip_cfg.get("model_name", "conch_ViT-B-16")
+    checkpoint_path = clip_cfg.get("checkpoint_path")
+    cache_dir = clip_cfg.get("cache_dir")
+    hf_hub = clip_cfg.get("hf_hub")
+    hf_token = clip_cfg.get("hf_token")
+    force_image_size = clip_cfg.get("force_image_size")
+    proj_contrast = clip_cfg.get("proj_contrast", False)
+    freeze = clip_cfg.get("freeze", True)
+    return ConchAdapter(
+        model_name=model_name,
+        checkpoint_path=checkpoint_path,
+        device=device,
+        force_image_size=force_image_size,
+        cache_dir=cache_dir,
+        hf_hub=hf_hub,
+        hf_token=hf_token,
+        proj_contrast=proj_contrast,
+        freeze=freeze,
+    )
 
 def build_model(cfg, checkpoint_path, device):
+    clip_adapter = build_clip_adapter(cfg, device)
     model = ClsNetwork(
         backbone=cfg.model.backbone.config,
         stride=cfg.model.backbone.stride,
         cls_num_classes=cfg.dataset.cls_num_classes,
         num_prototypes_per_class=cfg.model.num_prototypes_per_class,
         prototype_feature_dim=cfg.model.prototype_feature_dim,
+        clip_adapter=clip_adapter,
         n_ratio=cfg.model.n_ratio,
         pretrained=False,
         enable_text_fusion=getattr(cfg.model, "enable_text_fusion", True),
