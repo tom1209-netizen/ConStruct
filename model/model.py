@@ -112,12 +112,13 @@ class CoCoOpLearner(nn.Module):
             raise RuntimeError(
                 "Unable to access CONCH token embedding for CoCoOp.")
         dtype = token_embedding.weight.dtype
+        dev = token_embedding.weight.device
         embed_dim = clip_adapter.embed_dim
 
         if ctx_init:
             ctx_init = ctx_init.replace("_", " ")
             n_ctx = len(ctx_init.split(" "))
-            tokenized = clip_adapter.tokenize(ctx_init)
+            tokenized = clip_adapter.tokenize(ctx_init).to(dev)
             with torch.no_grad():
                 embedding = token_embedding(tokenized).type(dtype)
             ctx_vectors = embedding[0, 1: 1 + n_ctx, :]
@@ -130,7 +131,7 @@ class CoCoOpLearner(nn.Module):
 
         prompts = [prompt_prefix + " " + name +
                    "." for name in self.class_names]
-        tokenized_prompts = clip_adapter.tokenize(prompts)
+        tokenized_prompts = clip_adapter.tokenize(prompts).to(dev)
         with torch.no_grad():
             embedding = token_embedding(tokenized_prompts).type(dtype)
         self.register_buffer(
