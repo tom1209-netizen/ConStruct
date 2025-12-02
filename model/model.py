@@ -105,16 +105,17 @@ class CoCoOpLearner(nn.Module):
                             for name in class_names]
         self.n_cls = len(self.class_names)
         self.n_ctx = n_ctx
-        self.meta_net = MetaNet(vis_dim, embed_dim_tokens)
-
         token_embedding = clip_adapter.get_token_embedding()
         if token_embedding is None:
             raise RuntimeError(
                 "Unable to access CONCH token embedding for CoCoOp.")
-        tok_weight = token_embedding.weight
+        tok_weight = getattr(token_embedding, "weight", None)
+        if tok_weight is None:
+            raise RuntimeError("Token embedding missing weight parameter.")
         dtype = tok_weight.dtype
         dev = tok_weight.device
         embed_dim_tokens = tok_weight.shape[1]
+        self.meta_net = MetaNet(vis_dim, embed_dim_tokens)
 
         if ctx_init:
             ctx_init = ctx_init.replace("_", " ")
