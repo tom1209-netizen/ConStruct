@@ -434,7 +434,7 @@ class ClsNetwork(nn.Module):
                 self.cocoop_learner = CoCoOpLearner(
                     clip_adapter=self.clip_adapter,
                     class_names=names,
-                    vis_dim=self.clip_visual_dim,
+                    vis_dim=self.clip_adapter.embed_dim,
                     n_ctx=cocoop_n_ctx,
                     ctx_init=cocoop_ctx_init,
                 )
