@@ -118,89 +118,54 @@ class ConchAdapter(nn.Module):
     def get_token_embedding(self):
         """
         Expose raw token embedding layer for building custom prompts.
-        Checks multiple possible attribute paths for compatibility with different
-        OpenCLIP/CONCH versions.
         """
-        model = self.model
-
-        # List of potential paths to the token embedding layer
-        candidates = [
-            # Standard OpenCLIP
-            lambda m: m.token_embedding,
-            # Common Transformer implementation
-            lambda m: m.transformer.token_embedding,
-            # Some CoCa / Custom variants
-            lambda m: m.text.token_embedding,
-            lambda m: m.text_encoder.token_embedding,
-            # HuggingFace style
-            lambda m: m.text_model.embeddings.token_embedding,
-            lambda m: m.embeddings.token_embedding,
-        ]
-
-        for path_fn in candidates:
-            try:
-                layer = path_fn(model)
-                if isinstance(layer, nn.Embedding):
-                    return layer
-            except AttributeError:
-                continue
-
-        # If we reach here, we couldn't find it.
-        # Print model structure to help debug (check your log file)
-        print("\n[DEBUG] Could not find token_embedding. Model structure:")
-        print(model)
-        print("[DEBUG] End of model structure.\n")
-
-        return None
+        return self.model.text.token_embedding
 
     def encode_text_with_embeddings(self, embeddings: torch.Tensor, normalize: bool = True) -> torch.Tensor:
         """
         Encode text when token embeddings are preassembled. Gradients are not
         propagated into the CONCH text encoder.
         """
-        model = self.model
+        text_module = self.model.text
         device = embeddings.device
         with torch.no_grad():
             x = embeddings
-            pos_emb = getattr(model, "positional_embedding", None)
-            if pos_emb is not None:
-                pe = pos_emb
-                if pe.shape[0] < x.shape[1]:
-                    pe = F.interpolate(
-                        pe.unsqueeze(0).permute(0, 2, 1),
-                        size=x.shape[1],
-                        mode="linear",
-                        align_corners=False,
-                    ).permute(0, 2, 1).squeeze(0)
-                x = x + pe[: x.shape[1], :].to(device)
+            pos_emb = text_module.positional_embedding
+            pe = pos_emb
+            if pe.shape[0] < x.shape[1]:
+                pe = F.interpolate(
+                    pe.unsqueeze(0).permute(0, 2, 1),
+                    size=x.shape[1],
+                    mode="linear",
+                    align_corners=False,
+                ).permute(0, 2, 1).squeeze(0)
+            x = x + pe[: x.shape[1], :].to(device)
 
-            if hasattr(model, "transformer"):
-                x = x.permute(1, 0, 2)  # NLD -> LND
-                x = model.transformer(x)
-                x = x.permute(1, 0, 2)  # LND -> NLD
+            x = x.permute(1, 0, 2)  # NLD -> LND
+            x = text_module.transformer(x)
+            x = x.permute(1, 0, 2)  # LND -> NLD
 
-            if hasattr(model, "ln_final"):
-                x = model.ln_final(x)
+            x = text_module.ln_final(x)
 
             x = x[:, -1, :]
 
-            text_proj = getattr(model, "text_projection", None)
-            if text_proj is not None:
-                x = x @ text_proj
+            x = x @ text_module.text_projection
 
             if normalize:
                 x = F.normalize(x, dim=-1)
         return x
 
-    # Image
-    def encode_image(self, images: torch.Tensor, normalize: bool = True) -> torch.Tensor:
+    # Update this method signature
+    def encode_image(self, images: torch.Tensor, normalize: bool = True, proj_contrast: Optional[bool] = None) -> torch.Tensor:
         """
         Encode images in the CONCH image-text space.
-        By default, returns embeddings before the contrastive projection head so they
-        stay aligned with text embeddings when proj_contrast=False.
+        Allows overriding proj_contrast for specific use cases.
         """
-        proj = self.proj_contrast
+        # Use argument if provided, else fall back to config default
+        proj = proj_contrast if proj_contrast is not None else self.proj_contrast
+
         with torch.no_grad():
+            # Pass the proj_contrast argument to the underlying CoCa model
             feats = self.model.encode_image(
                 images.to(self.device), normalize=normalize, proj_contrast=proj)
         return feats

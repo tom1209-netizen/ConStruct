@@ -9,11 +9,11 @@ model:
   
   n_ratio: 0.5
   num_prototypes_per_class: 3
-  prototype_feature_dim: 768
+  prototype_feature_dim: 512
 
   # Text fusion settings
   enable_text_fusion: true
-  fusion_dim: 768
+  fusion_dim: 512
 
   # Text prompt settings
   learnable_text_prompt: true
@@ -55,7 +55,7 @@ clip:
   hf_hub: null
   hf_token: null
   force_image_size: 448
-  proj_contrast: false
+  proj_contrast: true
   freeze: true
 
 dataset:
