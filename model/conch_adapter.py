@@ -118,11 +118,39 @@ class ConchAdapter(nn.Module):
     def get_token_embedding(self):
         """
         Expose raw token embedding layer for building custom prompts.
+        Checks multiple possible attribute paths for compatibility with different
+        OpenCLIP/CONCH versions.
         """
-        if hasattr(self.model, "token_embedding"):
-            return self.model.token_embedding
-        if hasattr(getattr(self.model, "transformer", None), "token_embedding"):
-            return self.model.transformer.token_embedding
+        model = self.model
+
+        # List of potential paths to the token embedding layer
+        candidates = [
+            # Standard OpenCLIP
+            lambda m: m.token_embedding,
+            # Common Transformer implementation
+            lambda m: m.transformer.token_embedding,
+            # Some CoCa / Custom variants
+            lambda m: m.text.token_embedding,
+            lambda m: m.text_encoder.token_embedding,
+            # HuggingFace style
+            lambda m: m.text_model.embeddings.token_embedding,
+            lambda m: m.embeddings.token_embedding,
+        ]
+
+        for path_fn in candidates:
+            try:
+                layer = path_fn(model)
+                if isinstance(layer, nn.Embedding):
+                    return layer
+            except AttributeError:
+                continue
+
+        # If we reach here, we couldn't find it.
+        # Print model structure to help debug (check your log file)
+        print("\n[DEBUG] Could not find token_embedding. Model structure:")
+        print(model)
+        print("[DEBUG] End of model structure.\n")
+
         return None
 
     def encode_text_with_embeddings(self, embeddings: torch.Tensor, normalize: bool = True) -> torch.Tensor:
