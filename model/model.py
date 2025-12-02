@@ -105,15 +105,16 @@ class CoCoOpLearner(nn.Module):
                             for name in class_names]
         self.n_cls = len(self.class_names)
         self.n_ctx = n_ctx
-        self.meta_net = MetaNet(vis_dim, clip_adapter.embed_dim)
+        self.meta_net = MetaNet(vis_dim, embed_dim_tokens)
 
         token_embedding = clip_adapter.get_token_embedding()
         if token_embedding is None:
             raise RuntimeError(
                 "Unable to access CONCH token embedding for CoCoOp.")
-        dtype = token_embedding.weight.dtype
-        dev = token_embedding.weight.device
-        embed_dim = clip_adapter.embed_dim
+        tok_weight = token_embedding.weight
+        dtype = tok_weight.dtype
+        dev = tok_weight.device
+        embed_dim_tokens = tok_weight.shape[1]
 
         if ctx_init:
             ctx_init = ctx_init.replace("_", " ")
@@ -121,10 +122,10 @@ class CoCoOpLearner(nn.Module):
             tokenized = clip_adapter.tokenize(ctx_init).to(dev)
             with torch.no_grad():
                 embedding = token_embedding(tokenized).type(dtype)
-            ctx_vectors = embedding[0, 1: 1 + n_ctx, :]
+            ctx_vectors = embedding[0, 1: 1 + n_ctx, :].clone()
             prompt_prefix = ctx_init
         else:
-            ctx_vectors = torch.empty(self.n_ctx, embed_dim, dtype=dtype)
+            ctx_vectors = torch.empty(self.n_ctx, embed_dim_tokens, dtype=dtype, device=dev)
             nn.init.normal_(ctx_vectors, std=0.02)
             prompt_prefix = " ".join(["X"] * self.n_ctx)
         self.ctx = nn.Parameter(ctx_vectors)
