@@ -37,7 +37,7 @@ model:
 
   # CoCoOp (conditional prompts)
   enable_cocoop: true
-  cocoop_n_ctx: 4
+  cocoop_n_ctx: 8
   cocoop_ctx_init: "Histopathology image showing"
   cocoop_class_names: null
 
@@ -74,8 +74,8 @@ work_dir:
 
 train:
   samples_per_gpu: 10
-  epoch: 16
-  warmup_iters: 3000
+  epoch: 8
+  warmup_iters: 2000
   pretrained: true
 
   # Classification losses for multi-scale features
@@ -90,23 +90,17 @@ train:
   l_proto_temp: 0.07
 
   # Fusion and diversity losses 
-  lambda_j: 0.00  # Disable Jeffreys divergence loss
+  lambda_j: 0.25
   l_fuse: 1.0
   l_struct: 1.0
 
   # Diversity loss settings
   diversity:
-    omega_window: 7
-    omega_min_mass: 0.1
-    temperature: 0.05
-    sharpness_weight: 0.2
+    repulsion_weight: 0.5
     coverage_weight: 0.2
-    repulsion_weight: 0.8
-    repulsion_margin: 0.25
-    jeffreys_weight: 0.1
-    pool_size: 14
-    debug: false
-    debug_every: 500
+    omega_min_mass: 0.05
+    spatial_weight: 0.1
+    spatial_jeffreys_weight: 0.05
 
   # Mask settings
   mask_adapter_alpha: 0.5

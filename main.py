@@ -280,30 +280,20 @@ def build_loss_components(cfg, device, clip_adapter):
     div_cfg = getattr(cfg.train, "diversity", None)
     diversity_loss_fn = PrototypeDiversityRegularizer(
         num_prototypes_per_class=cfg.model.num_prototypes_per_class,
-        omega_window=(div_cfg.omega_window if div_cfg else 7),
-        omega_min_mass=(div_cfg.omega_min_mass if div_cfg else 0.05),
-        temperature=(div_cfg.temperature if div_cfg and hasattr(
-            div_cfg, "temperature") else 0.07),
-        sharpness_weight=(div_cfg.sharpness_weight if div_cfg and hasattr(
-            div_cfg, "sharpness_weight") else 0.1),
-        coverage_weight=(div_cfg.coverage_weight if div_cfg and hasattr(
-            div_cfg, "coverage_weight") else 0.1),
         repulsion_weight=(div_cfg.repulsion_weight if div_cfg and hasattr(
-            div_cfg, "repulsion_weight") else 0.5),
-        repulsion_margin=(div_cfg.repulsion_margin if div_cfg and hasattr(
-            div_cfg, "repulsion_margin") else 0.2),
-        jeffreys_weight=(div_cfg.jeffreys_weight if div_cfg and hasattr(
-            div_cfg, "jeffreys_weight") else 0.0),
-        pool_size=(div_cfg.pool_size if div_cfg and hasattr(
-            div_cfg, "pool_size") else None),
-        debug=(div_cfg.debug if div_cfg and "debug" in div_cfg else False),
-        debug_every=(
-            div_cfg.debug_every if div_cfg and "debug_every" in div_cfg else 200),
+            div_cfg, "repulsion_weight") else 0.0),
+        coverage_weight=(div_cfg.coverage_weight if div_cfg and hasattr(
+            div_cfg, "coverage_weight") else 0.0),
+        spatial_weight=(div_cfg.spatial_weight if div_cfg and hasattr(
+            div_cfg, "spatial_weight") else 0.0),
+        spatial_jeffreys_weight=(div_cfg.spatial_jeffreys_weight if div_cfg and hasattr(
+            div_cfg, "spatial_jeffreys_weight") else 0.0),
+        omega_min_mass=(div_cfg.omega_min_mass if div_cfg and hasattr(
+            div_cfg, "omega_min_mass") else 0.05),
     ).to(device)
     lambda_fuse = getattr(cfg.train, "l_fuse", 1.0)
     lambda_proto_text = getattr(cfg.train, "l_proto_text", 0.0)
     proto_text_temp = getattr(cfg.train, "l_proto_temp", 0.07)
-
     return {
         "cls": loss_function,
         "feature_extractor": feature_extractor,
@@ -490,8 +480,15 @@ def train(cfg, args):
                 pseudo_mask_resized = F.interpolate(
                     pseudo_mask.unsqueeze(1).float(), size=feature_map_for_diversity.shape[2:], mode="nearest"
                 ).squeeze(1).long()
+                proto_mask = cls_labels.unsqueeze(-1).expand(
+                    -1, cls_labels.shape[1], cfg.model.num_prototypes_per_class
+                ).reshape(cls_labels.shape[0], -1)
                 diversity_loss = diversity_loss_fn(
-                    feature_map_for_diversity, projected_p4, pseudo_mask_resized, global_step=n_iter)
+                    cam_maps=cam4,
+                    prototypes=model.prototypes,
+                    proto_mask=proto_mask,
+                    global_step=n_iter,
+                )
                 iter_diversity_loss = diversity_loss.detach().item()
                 diversity_running_avg = monitor_diversity_loss(
                     diversity_meter, diversity_loss)
