@@ -12,7 +12,7 @@ train:
 	mkdir -p $(LOG_DIR); \
 	LOG=$(LOG_DIR)/train-$${STAMP}.log; \
 	echo ">>> Logging to $$LOG"; \
-	python main.py --config $(CONFIG) --gpu $(GPU) 2>&1 | tee $$LOG
+	python main.py --config $(CONFIG) --gpu $(GPU) | tee $$LOG
 
 .PHONY: eval
 eval:
