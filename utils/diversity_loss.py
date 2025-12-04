@@ -74,11 +74,11 @@ class PrototypeDiversityRegularizer(nn.Module):
 
         # Spatial constraints (also used for coverage)
         if self.spatial_weight > 0 or self.spatial_jeffreys_weight > 0 or self.coverage_weight > 0:
-            # [B, P, HW] (spatial norm)
+            # [B, P, HW] spatial norm
             probs = F.softmax(cam_maps.view(B, P, -1), dim=2)
             log_probs = probs.clamp_min(1e-8).log()
-            # [B, P, H, W] (prototype competition)
-            proto_probs = F.softmax(cam_maps, dim=1)
+            # Sharpen prototype competition to reduce overlap
+            proto_probs = F.softmax(cam_maps * 5.0, dim=1)  # [B, P, H, W]
 
             # Coverage: balanced usage across active prototypes (use proto-wise probs)
             if self.coverage_weight > 0:
@@ -125,8 +125,7 @@ class PrototypeDiversityRegularizer(nn.Module):
 
             # Separation (Jeffreys divergence between prototype maps)
             if self.spatial_jeffreys_weight > 0 and P > 1:
-                sep_total = cam_maps.new_tensor(0.0)
-                count = 0
+                sep_terms = []
                 for b in range(B):
                     active_idx = (proto_mask[b] > 0).nonzero(as_tuple=True)[0]
                     n_active = active_idx.numel()
@@ -139,10 +138,11 @@ class PrototypeDiversityRegularizer(nn.Module):
                     jeff = kl_matrix + kl_matrix.t()
                     triu = torch.triu_indices(n_active, n_active, offset=1)
                     pair_div = jeff[triu[0], triu[1]]
-                    sep_total = sep_total - pair_div.mean()
-                    count += 1
-                if count > 0:
-                    loss = loss + self.spatial_jeffreys_weight * \
-                        (sep_total / count)
+                    if pair_div.numel() > 0:
+                        sep_terms.append(pair_div.mean())
+                if sep_terms:
+                    jeff_mean = torch.stack(sep_terms).mean()
+                    sep_loss = torch.exp(-jeff_mean)  # bounded in (0,1]
+                    loss = loss + self.spatial_jeffreys_weight * sep_loss
 
         return loss

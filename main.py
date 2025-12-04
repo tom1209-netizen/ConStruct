@@ -472,7 +472,8 @@ def train(cfg, args):
                         set_info["bg_text"],
                     )
                     mem_queue = memory_bank.get_negatives() if memory_bank is not None else None
-                    fg_loss = fg_loss_fn(fg_features, fg_pro, bg_pro, memory_queue=mem_queue)
+                    fg_loss = fg_loss_fn(
+                        fg_features, fg_pro, bg_pro, memory_queue=mem_queue)
                     bg_loss = bg_loss_fn(bg_features, fg_pro, bg_pro)
                     contrastive_loss = fg_loss + bg_loss
                     if memory_bank is not None:
@@ -517,7 +518,14 @@ def train(cfg, args):
                     )
 
                 lambda_sim = cfg.train.l5
-                lambda_j = cfg.train.lambda_j
+                ramp_steps = 10000
+                current_step = max(0, n_iter - cfg.train.warmup_iters)
+                linear_progress = min(1.0, current_step / ramp_steps)
+                diversity_factor = linear_progress ** 3
+                lambda_j = cfg.train.lambda_j * diversity_factor
+                if (n_iter + 1) % 100 == 0:
+                    print(
+                        f"  [Ramp-Up] Step: {current_step}/{ramp_steps}, Factor: {diversity_factor:.4f}")
                 loss = cls_loss + lambda_j * diversity_loss
                 if proto_text_loss is not None:
                     loss = loss + lambda_proto_text * proto_text_loss
