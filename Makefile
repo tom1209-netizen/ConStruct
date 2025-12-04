@@ -16,7 +16,11 @@ train:
 
 .PHONY: eval
 eval:
-	@python visualization_utils/evaluate_performance.py --config $(CONFIG) --checkpoint $(CHECKPOINT) --gpu $(GPU) --split $(SPLIT)
+	@STAMP=$$(date +"%Y%m%d-%H%M%S"); \
+	mkdir -p $(LOG_DIR); \
+	LOG=$(LOG_DIR)/eval-$${STAMP}.log; \
+	echo ">>> Logging to $$LOG"; \
+	python visualization_utils/evaluate_performance.py --config $(CONFIG) --checkpoint $(CHECKPOINT) --gpu $(GPU) --split $(SPLIT) 2>&1 | tee $$LOG
 
 .PHONY: cam
 cam:
