@@ -134,6 +134,25 @@ class DistilledConch(nn.Module):
         self.clip_adapter = clip_adapter
         self.prototype_feature_dim = getattr(
             self.clip_adapter, "embed_dim", prototype_feature_dim)
+
+        # Backbone hidden dim from ViT trunk (e.g., 768 for ViT-B, 1024 for ViT-L)
+        model_name_lower = str(
+            getattr(self.clip_adapter, "model_name", "")).lower()
+        if "vit-l" in model_name_lower:
+            self.backbone_feature_dim = 1024
+        elif "vit-b" in model_name_lower:
+            self.backbone_feature_dim = 768
+        else:
+            # Fallback to trunk attributes if available
+            trunk = getattr(getattr(self.clip_adapter.model,
+                            "visual", None), "trunk", None)
+            self.backbone_feature_dim = (
+                getattr(trunk, "embed_dim", None)
+                or getattr(trunk, "num_features", None)
+                or self.prototype_feature_dim
+            )
+        print(
+            f"DistilledConch: backbone feature dim {self.backbone_feature_dim}, prototype dim {self.prototype_feature_dim}")
         for p in self.clip_adapter.model.parameters():
             p.requires_grad_(False)
 
@@ -157,7 +176,7 @@ class DistilledConch(nn.Module):
                 p.requires_grad_(False)
 
         # Structure adapters (trainable)
-        self.in_channels = [self.prototype_feature_dim] * 4
+        self.in_channels = [self.backbone_feature_dim] * 4
         self.structure_adapters = nn.ModuleList(
             [FeatureRefinementHead(ch) for ch in self.in_channels])
         self.structural_loss_fn = StructuralConsistencyLoss()
