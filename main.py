@@ -276,26 +276,20 @@ def train(cfg, args):
             current_miou = val_mIoU
             print(f"mIOU (for saving): {current_miou:.4f}")
 
-            saving_grace_period = cfg.train.eval_iters
-            if (n_iter + 1) > (cfg.train.warmup_iters + saving_grace_period):
-                best_fuse234_dice = save_best(
-                    model, optimizer, best_fuse234_dice, cfg, n_iter, current_miou)
-            else:
-                print(
-                    f"--- In warm-up or grace period (current iter: {n_iter + 1}). Skipping best model check. ---")
+            best_fuse234_dice = save_best(
+                model, optimizer, best_fuse234_dice, cfg, n_iter, current_miou)
 
     torch.cuda.empty_cache()
     end_time = datetime.datetime.now()
     total_training_time = end_time - time0
     print(f"Total training time: {total_training_time}")
 
-    final_evaluation(cfg, device, num_workers, model,
-                     loss_function, train_dataset)
+    final_evaluation(cfg, device, num_workers, model, loss_function)
 
 
-def final_evaluation(cfg, device, num_workers, model, loss_function, train_dataset):
+def final_evaluation(cfg, device, num_workers, model, loss_function):
     print("\n" + "=" * 80)
-    print("POST-TRAINING EVALUATION AND CAM GENERATION")
+    print("POST-TRAINING EVALUATION")
     print("=" * 80)
 
     print("\nPreparing test dataset...")
@@ -312,9 +306,7 @@ def final_evaluation(cfg, device, num_workers, model, loss_function, train_datas
         persistent_workers=True,
     )
 
-    print("\n1. Testing on test dataset...")
-    print("-" * 50)
-
+    print("\nTesting on test dataset...")
     test_mIoU, test_mean_dice, test_fw_iu, test_iu_per_class, test_dice_per_class = validate(
         model=model, data_loader=test_loader, cfg=cfg, cls_loss_func=loss_function
     )
@@ -335,39 +327,6 @@ def final_evaluation(cfg, device, num_workers, model, loss_function, train_datas
         label = f"Class {i}" if i < len(
             test_dice_per_class) - 1 else "Background"
         print(f"  {label}: {score*100:.4f}")
-
-    print("\n2. Generating CAMs for complete training dataset...")
-    print("-" * 50)
-
-    train_cam_loader = DataLoader(
-        train_dataset,
-        batch_size=1,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=True,
-        persistent_workers=True,
-    )
-
-    print(f"Generating CAMs for all {len(train_dataset)} training samples...")
-    print(f"Output directory: {cfg.work_dir.pred_dir}")
-
-    best_model_path = os.path.join(cfg.work_dir.ckpt_dir, "best_cam.pth")
-    if os.path.exists(best_model_path):
-        print(f"Loading best model from: {best_model_path}")
-        checkpoint = torch.load(best_model_path, map_location=device)
-        model.load_state_dict(checkpoint["model"])
-        best_iter = checkpoint.get("iter", "unknown")
-        print(
-            f"Best model loaded successfully! (Saved at iteration: {best_iter})")
-    else:
-        print("Warning: Best model checkpoint not found, using current model state")
-        print(f"Expected path: {best_model_path}")
-
-    generate_cam(model=model, data_loader=train_cam_loader, cfg=cfg)
-
-    print("\nFiles generated:")
-    print(f"  Training CAM visualizations: {cfg.work_dir.pred_dir}/*.png")
-    print(f"  Model checkpoint: {cfg.work_dir.ckpt_dir}/best_cam.pth")
     print("=" * 80)
 
 
