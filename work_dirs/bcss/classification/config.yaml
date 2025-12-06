@@ -57,20 +57,28 @@ train:
     warmup_iters: 0
     pretrained: true
 
-    # Only keep main cls + structural distillation
+    # Classification loss weight
     l1: 0.0
     l2: 0.0
     l3: 0.0
     l4: 1.0
-    l5: 0.0
-    l_proto_text: 0.0
-    l_proto_temp: 0.07
-    lambda_j: 0.0
-    l_fuse: 0.0
+
+    # Contrastive loss weight
+    l_contrast: 0.2
+
+    # Memory bank size for contrastive learning
+    memory_bank_size: 2048
+
+    # Distillation loss weight
     l_struct: 1.5
+
+    # Prototype diversity loss weight
     diversity: {}
-    memory_bank_size: 0
+
+    # Mask adapter alpha for SegFormer-guided distillation
     mask_adapter_alpha: 0.5
+
+    # Merging method for bag-level predictions
     merge_train: mean
     merge_test: max
 

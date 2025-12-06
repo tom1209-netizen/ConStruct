@@ -12,11 +12,15 @@ from torch.utils.data import DataLoader
 
 from model.model import DistilledConch
 from model.conch_adapter import ConchAdapter
-from utils.hierarchical_utils import merge_to_parent_predictions
+from utils.hierarchical_utils import merge_to_parent_predictions, pair_features
+from utils.fgbg_feature import FeatureExtractor, MaskAdapter_DynamicThreshold
+from utils.contrast_loss import InfoNCELossFG, InfoNCELossBG
 from utils.optimizer import PolyWarmupAdamW
 from utils.pyutils import set_seed
-from utils.trainutils import get_cls_dataset
+from utils.trainutils import get_cls_dataset, get_mean_std
 from utils.validate import generate_cam, validate
+from utils.memory_bank import FeatureMemoryBank
+import torch.nn.functional as F
 
 
 def parse_args():
@@ -192,6 +196,7 @@ def train(cfg, args):
     num_workers = min(10, os.cpu_count())
 
     clip_model = build_clip_model(cfg, device)
+    input_mean, input_std = get_mean_std(cfg.dataset.name)
     time0 = datetime.datetime.now().replace(microsecond=0)
 
     print("\nPreparing datasets...")
@@ -209,6 +214,35 @@ def train(cfg, args):
 
     loss_function = nn.BCEWithLogitsLoss().to(device)
     lambda_struct = getattr(cfg.train, "l_struct", 0.0)
+    lambda_contrast = getattr(cfg.train, "l_contrast", 0.0)
+
+    fg_loss_fn = InfoNCELossFG(temperature=0.07).to(
+        device) if lambda_contrast > 0 else None
+    bg_loss_fn = InfoNCELossBG(temperature=0.07).to(
+        device) if lambda_contrast > 0 else None
+    
+    feature_extractor = None
+    memory_bank = None
+    if lambda_contrast > 0:
+
+        mask_adapter = MaskAdapter_DynamicThreshold(
+            alpha=cfg.train.mask_adapter_alpha)
+        
+        feature_extractor = FeatureExtractor(
+            mask_adapter=mask_adapter,
+            clip_adapter=clip_model,
+            clip_size=getattr(cfg.model, "clip_size", None),
+            input_mean=input_mean,
+            input_std=input_std,
+        )
+
+        bank_size = getattr(cfg.train, "memory_bank_size", 0)
+        if bank_size > 0:
+            memory_bank = FeatureMemoryBank(
+                feature_dim=model.prototype_feature_dim,
+                size=bank_size,
+                device=device,
+            )
 
     scaler = torch.cuda.amp.GradScaler()
     model.train()
@@ -234,7 +268,36 @@ def train(cfg, args):
             cls_merge = merge_to_parent_predictions(
                 cls_logits, k_list, method=cfg.train.merge_train)
             cls_loss = loss_function(cls_merge, cls_labels)
+
+            # Constrastive loss module
+            contrastive_loss = None
+            if lambda_contrast > 0 and feature_extractor is not None:
+                cam = outputs[7]
+                cam = F.relu(cam)
+                batch_info = feature_extractor.process_batch(
+                    inputs, cam, cls_labels)
+                if batch_info is not None:
+                    fg_features = batch_info["fg_features"]
+                    bg_features = batch_info["bg_features"]
+                    # Use class-mean prototype vectors as text anchors
+                    text_feats = model.prototypes.view(
+                        cfg.dataset.cls_num_classes, cfg.model.num_prototypes_per_class, -1
+                    ).mean(dim=1).detach()
+                    paired = pair_features(
+                        fg_features, bg_features, text_feats, cls_labels)
+                    mem_queue = memory_bank.get_negatives() if memory_bank is not None else None
+                    fg_loss = fg_loss_fn(
+                        paired["fg_features"], paired["fg_text"], paired["bg_text"], memory_queue=mem_queue)
+                    bg_loss = bg_loss_fn(
+                        paired["bg_features"], paired["fg_text"], paired["bg_text"])
+                    contrastive_loss = fg_loss + bg_loss
+                    if memory_bank is not None:
+                        memory_bank.push(
+                            paired["bg_features"].reshape(-1, paired["bg_features"].shape[-1]))
+
             loss = cls_loss
+            if contrastive_loss is not None:
+                loss = loss + lambda_contrast * contrastive_loss
             distill_loss = outputs[-1] if outputs else None
             if distill_loss is not None and lambda_struct > 0:
                 loss = loss + lambda_struct * distill_loss
