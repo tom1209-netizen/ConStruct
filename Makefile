@@ -1,7 +1,7 @@
 CONFIG ?= work_dirs/bcss/classification/config.yaml
 GPU ?= 0
 LOG_DIR ?= logs
-CHECKPOINT ?= work_dirs/bcss/classification/checkpoints/2025-12-06-19-55/best_cam.pth
+CHECKPOINT ?= work_dirs/bcss/classification/checkpoints/2025-12-08-23-57/best_cam.pth
 CHECKPOINT_DISTILLED ?= $(CHECKPOINT)
 CHECKPOINT_BASELINE ?= checkpoints/conch/pytorch_model.bin
 SPLIT ?= test
@@ -50,7 +50,7 @@ structure:
 .PHONY: maps
 maps:
 	@echo "Running Feature Map Visualization (Raw vs Distilled vs SegFormer)..."
-	python visualize_maps.py --config $(CONFIG) \
+	python visualization_utils/visualize_maps.py --config $(CONFIG) \
 		--checkpoint $(CHECKPOINT) \
 		--gpu $(GPU) \
 		--output-dir $(MAPS_OUT) \

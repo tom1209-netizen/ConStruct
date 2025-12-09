@@ -61,9 +61,13 @@ class FeatureRefinementHead(nn.Module):
             nn.GELU(),
             nn.Conv2d(dim, dim, 1),
         )
+        
+        # Zero-init the last convolution so the adapter starts as Identity
+        nn.init.constant_(self.net[-1].weight, 0)
+        nn.init.constant_(self.net[-1].bias, 0)
 
     def forward(self, x):
-        return self.net(x)
+        return x + self.net(x)
 
 
 class AdaptiveLayer(nn.Module):
@@ -162,15 +166,36 @@ class DistilledConch(nn.Module):
         if self.enable_segformer_guidance:
             self.segformer_teacher = getattr(
                 mix_transformer, segformer_backbone)(stride=[4, 2, 2, 1])
+            
             if segformer_checkpoint:
-                state_dict = torch.load(
-                    segformer_checkpoint, map_location="cpu")
-                state_dict = {
-                    k: v for k, v in state_dict.items()
-                    if k in self.segformer_teacher.state_dict()
-                }
-                self.segformer_teacher.load_state_dict(
-                    state_dict, strict=False)
+                print(f"Loading SegFormer teacher from {segformer_checkpoint}...")
+                checkpoint = torch.load(segformer_checkpoint, map_location="cpu")
+                
+                if "state_dict" in checkpoint:
+                    state_dict = checkpoint["state_dict"]
+                elif "model" in checkpoint:
+                    state_dict = checkpoint["model"]
+                else:
+                    state_dict = checkpoint
+
+                new_state_dict = {}
+                for k, v in state_dict.items():
+                    k = k.replace("backbone.", "").replace("module.", "")
+                    
+                    if "head" in k:
+                        continue
+                        
+                    new_state_dict[k] = v
+                
+                missing, unexpected = self.segformer_teacher.load_state_dict(
+                    new_state_dict, strict=True) 
+                
+                print(f"  > SegFormer keys loaded successfully (Strict=True).")
+
+            self.segformer_teacher.eval()
+            for p in self.segformer_teacher.parameters():
+                p.requires_grad_(False)
+            
             self.segformer_teacher.eval()
             for p in self.segformer_teacher.parameters():
                 p.requires_grad_(False)

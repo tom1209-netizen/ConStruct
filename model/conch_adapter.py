@@ -130,23 +130,18 @@ class ConchAdapter(nn.Module):
         return feats
 
     # Multi-scale features
-    def visual_intermediates(self, images: torch.Tensor, use_grad: bool = False) -> List[torch.Tensor]:
+    def visual_intermediates(self, images: torch.Tensor, use_grad: bool = False, all_blocks: bool = False) -> List[torch.Tensor]:
         """
-        Build a 4-level feature pyramid by tapping intermediate ViT blocks
-        (SETR/UPerNet style):
-            L3 -> upsample x4  (approx 1/4 scale)
-            L6 -> upsample x2  (approx 1/8 scale)
-            L9 -> keep         (approx 1/16 scale)
-            L12 -> avgpool x2  (approx 1/32 scale)
-
-        If intermediate blocks are unavailable, it falls back to pooling the
-        final token map.
+        Build a feature pyramid (default) or extract all intermediate ViT blocks 
+        (if all_blocks=True).
 
         Args:
             images: Input batch in the same normalization space expected by CONCH.
             use_grad: When True, keep the computation graph so ViT blocks can be
                 fine-tuned (needed for structural distillation). Default keeps
                 gradients detached for efficiency.
+            all_blocks: If True, returns the feature maps from EVERY transformer block
+                instead of the standard 4-level pyramid. Useful for layer-wise analysis.
         """
         images = images.to(self.device)
 
@@ -165,6 +160,10 @@ class ConchAdapter(nn.Module):
                 return []
             outputs: Dict[int, torch.Tensor] = {}
             hooks = []
+            
+            # If target_idxs is empty/None, collect all blocks? 
+            # Logic below expects specific indices.
+            
             for idx in target_idxs:
                 if idx >= len(trunk.blocks):
                     continue
@@ -179,8 +178,15 @@ class ConchAdapter(nn.Module):
                     h.remove()
             return [outputs[i] for i in sorted(outputs.keys()) if i in outputs]
 
-        # 0-indexed block taps for a 12-layer ViT-B
-        target_layers = [2, 5, 8, 11]
+        # Determine which layers to tap
+        if all_blocks:
+            trunk = getattr(getattr(self.model, "visual", None), "trunk", None)
+            total_blocks = len(trunk.blocks) if (trunk and hasattr(trunk, "blocks")) else 12
+            target_layers = list(range(total_blocks))
+        else:
+            # 0-indexed block taps for a 12-layer ViT-B for pyramid construction
+            target_layers = [2, 5, 8, 11]
+
         ctx = torch.enable_grad() if use_grad else torch.no_grad()
         with ctx:
             block_tokens = _collect_vit_blocks(target_layers)
@@ -197,6 +203,11 @@ class ConchAdapter(nn.Module):
         if not maps:
             return []
 
+        # If analyzing all blocks, return raw list (no pyramid/padding)
+        if all_blocks:
+            return maps
+
+        # --- Standard Pyramid Construction (default) ---
         # Pad/trim to 4 levels
         while len(maps) < 4:
             maps.append(maps[-1])

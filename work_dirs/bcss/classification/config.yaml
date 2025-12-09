@@ -15,7 +15,7 @@ model:
     segformer_guidance:
         enable: true
         backbone: mit_b1
-        checkpoint: null
+        checkpoint: ./checkpoints/segformer/mit_b1.pth
         layers: [2]
         train_clip_visual: false
         use_structure_adapter: true
