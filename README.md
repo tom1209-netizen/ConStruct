@@ -6,7 +6,7 @@ This repository contains the official PyTorch implementation of the paper **"Con
 
 ### **Title and Authorship**
 * **Title:** ConStruct: Structural Distillation of Foundation Models for Prototype-Based Weakly Supervised Histopathology Segmentation
-* **Authors:** Khang Le, Ha Thach, Anh M. Vu, Trang T. K. Vo, Han H. Huynh, David Yang, Minh H. N. Le, Thanh-Huy Nguyen, Akash Awasthi, Chandra Mohan, Zhu Han, and Hien Van Nguyen (with Khang Le and Ha Thach contributing equally)
+* **Authors:** Khang Le, Ha Thach, Anh M. Vu, Trang T. K. Vo, Han H. Huynh, David Yang, Minh H. N. Le, Thanh-Huy Nguyen, Akash Awasthi, Chandra Mohan, Zhu Han, and Hien Van Nguyen (with Khang Le, Ha Thach, Anh M. Vu contributing equally)
 * **Venue/Submission:** Proceedings of Machine Learning Research, Under Review: 1-13, 2026 / Full Paper MIDL 2026 submission
 
 ### **Core Problem and Motivation**
