@@ -140,15 +140,15 @@ This project uses the **BCSS (Breast Cancer Semantic Segmentation)** dataset for
 
 ### 2. Training
 
-Use the following command to train the full model. This includes the classification loss $\mathcal{L}_{\text{cls}}$, the similarity refinement loss $\mathcal{L}_{\text{sim}}$, and the structural distillation loss $\mathcal{L}_{\text{struct}}$.
-
-Or you could use the Makefile commands: `make train`, please check the Makefile for more target.
+Use the following command to train the full model.
 
 ```bash
 # Train the ConStruct model end-to-end
 # The config file manages hyperparameters
 python main.py --config ./work_dirs/bcss/construct/config.yaml --gpu 0
 ```
+
+Or alternatively you could also use the command in makefile `make train`
 
 Note: The training took about 20 mins on H1000 with 24GB GPU memory.
 
