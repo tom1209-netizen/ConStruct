@@ -57,7 +57,9 @@ This is an inference-only module used to refine the coarse CAMs into precise pix
 
 #### **Total Training Objective**
 The final training loss is a weighted sum of the three components:
-$\mathcal{L}_{total} = \lambda_{cls}\mathcal{L}_{cls} + \lambda_{struct}\mathcal{L}_{struct} + \lambda_{sim}\mathcal{L}_{sim}$
+
+$$\mathcal{L}_{total} = \lambda_{cls}\mathcal{L}_{cls} + \lambda_{struct}\mathcal{L}_{struct} + \lambda_{sim}\mathcal{L}_{sim}$$
+
 (Weights used: $\lambda_{cls}=1.0$, $\lambda_{struct}=1.5$, and $\lambda_{sim}=0.2$)
 
 ### **Key Results and Contributions**
@@ -86,9 +88,9 @@ Removing the **Relational Structural Distillation** module showed a drop in perf
 ### Requirements
 
 - Python **3.9**
-- PyTorch **1.9+** (or latest stable version)
+- PyTorch **1.9+** 
 - CUDA **11.0+**
-- Recommended: A machine with **$\ge$24GB GPU memory** for training.
+- Recommended: A machine with **$\ge$24GB GPU memory** for training. ( we used H1000 with 24GB GPU memory )
 
 ### Environment Setup
 
@@ -121,22 +123,34 @@ This project uses the **BCSS (Breast Cancer Semantic Segmentation)** dataset for
 
 ## Quick Start (One-Stage Training)
 
-ConStruct is trained end-to-end using a single command.
-
 ### 1. Download Pre-trained Weights
 
 - Download the pre-trained SegFormer MiT-B1 encoder weights.
-- Place the weight file into the `./pretrained_models/` directory.
+- Download the pre-trained CONCH ViT-B/16 encoder weights.
+- Place the weight files into the `./checkpoints/` directory.
+- Directory structure should look like this:
+
+```bash
+./checkpoints/
+├── segformer/
+│   └── mit-b1.pth
+└── conch/
+    └── pytorch_model.bin
+```
 
 ### 2. Training
 
-Use the following command to train the full model. This includes the classification loss ($\mathcal{L}_{\text{cls}}$), the similarity refinement loss ($\mathcal{L}_{\text{sim}}$), and the structural distillation loss ($\mathcal{L}_{\text{struct}}$).
+Use the following command to train the full model. This includes the classification loss $\mathcal{L}_{\text{cls}}$, the similarity refinement loss $\mathcal{L}_{\text{sim}}$, and the structural distillation loss $\mathcal{L}_{\text{struct}}$.
+
+Or you could use the Makefile commands: `make train`, please check the Makefile for more target.
 
 ```bash
 # Train the ConStruct model end-to-end
 # The config file manages hyperparameters
 python main.py --config ./work_dirs/bcss/construct/config.yaml --gpu 0
 ```
+
+Note: The training took about 20 mins on H1000 with 24GB GPU memory.
 
 ### 3. Test and Visualize
 
